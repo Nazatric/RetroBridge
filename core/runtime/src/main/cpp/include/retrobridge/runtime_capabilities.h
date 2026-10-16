@@ -11,6 +11,7 @@ struct RuntimeCapabilities final {
     bool native_guest_vfs = true;
     bool arm32_eabi_syscall_subset = true;
     bool bionic_and_guest_syscalls = false;
+    bool synthetic_jni_tables_and_handle_subset = true;
     bool synthetic_jni = false;
     bool android_framework_virtualization = false;
     bool arbitrary_guest_execution = false;

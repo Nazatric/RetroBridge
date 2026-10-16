@@ -6,6 +6,7 @@ set(RETROBRIDGE_RUNTIME_SOURCES
     src/arm32_interpreter.cpp
     src/guest_memory.cpp
     src/guest_heap.cpp
+    src/guest_jni_bridge.cpp
     src/elf32_loader.cpp
     ../../../../../native/vfs/native_vfs_path.cpp
     ../../../../../native/vfs/native_vfs.cpp

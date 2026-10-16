@@ -5,6 +5,7 @@
 #include "retrobridge/guest_memory.h"
 #include "retrobridge/guest_lifecycle.h"
 #include "retrobridge/guest_heap.h"
+#include "retrobridge/guest_jni_bridge.h"
 #include "retrobridge/handle_table.h"
 #include "retrobridge/runtime_capabilities.h"
 #include "arm32_syscall_dispatcher.h"
@@ -711,6 +712,190 @@ void test_guest_heap_allocation_and_coalescing() {
     check(!memory.is_mapped(GuestAddress32{0x10000000U}), "heap shutdown unmaps its guest arena");
 }
 
+void test_synthetic_jni_java_vm_tables_and_handles() {
+    using namespace retrobridge::runtime;
+    GuestMemory memory(1024U * 1024U);
+    GuestHeap32 heap(memory);
+    check(heap.initialize(GuestAddress32{0x10000000U}, 64U * 1024U), "JNI guest heap initializes");
+    GuestTrampolineRegistry trampolines;
+    GuestJniBridge jni(memory, heap, trampolines);
+    std::string diagnostic;
+    check(jni.initialize(&diagnostic), "synthetic JNI and JavaVM tables initialize");
+    if (!jni.initialized()) {
+        std::cerr << "JNI bridge diagnostic: " << diagnostic << '\n';
+        return;
+    }
+
+    std::vector<std::byte> return_code(4, std::byte{0});
+    put_u32(return_code, 0, 0xef000000U); // svc #0, used as the thunk return sentinel
+    check(memory.map_bytes(GuestAddress32{0x8000U}, return_code, return_code.size(),
+        GuestPermission::Read | GuestPermission::Execute), "JNI thunk return sentinel maps RX");
+    std::array<std::byte, 4> guest_code{std::byte{0x00}, std::byte{0x00}, std::byte{0xa0}, std::byte{0xe1}};
+    check(memory.map_bytes(GuestAddress32{0x9000U}, guest_code, guest_code.size(),
+        GuestPermission::Read | GuestPermission::Execute), "registered guest native method maps RX");
+    check(memory.map_zeroed(GuestAddress32{0x10000U}, 0x3000U,
+        GuestPermission::Read | GuestPermission::Write), "JNI test strings, table, stack, and output map RW");
+
+    const auto write_guest_string = [&](std::uint32_t address, std::string_view text) {
+        std::vector<std::byte> bytes(text.size() + 1U, std::byte{0});
+        for (std::size_t index = 0; index < text.size(); ++index) {
+            bytes[index] = static_cast<std::byte>(static_cast<unsigned char>(text[index]));
+        }
+        return memory.write(GuestAddress32{address}, bytes);
+    };
+    check(write_guest_string(0x10000U, "hello JNI \xe2\x98\x83"), "JNI UTF-8 fixture is staged");
+    check(write_guest_string(0x10100U, "com/example/Native"), "JNI class name fixture is staged");
+    check(write_guest_string(0x10200U, "nativeCall"), "JNI native method name fixture is staged");
+    check(write_guest_string(0x10300U, "([B)I"), "JNI method signature fixture is staged");
+
+    const auto env = jni.jni_env_address().value();
+    const auto vm = jni.java_vm_address().value();
+    const auto jni_table = memory.read_u32(jni.jni_env_address()).value_or(0);
+    const auto vm_table = memory.read_u32(jni.java_vm_address()).value_or(0);
+    check(jni_table != 0 && vm_table != 0, "guest JNIEnv and JavaVM objects point at guest function tables");
+
+    const auto svc = [](GuestCpuState32& state, std::uint32_t immediate, GuestMemory&) {
+        if (immediate == 0 && state.r[7] == 1) return GuestHookResult{GuestHookAction::Stop, "JNI test return"};
+        return GuestHookResult{GuestHookAction::Fault, "unexpected JNI test SVC"};
+    };
+    Arm32Interpreter interpreter(memory, trampolines, svc);
+    const auto invoke_jni = [&](std::size_t index, GuestCpuState32 state) {
+        const auto function = memory.read_u32(GuestAddress32{jni_table + static_cast<std::uint32_t>(index * 4U)});
+        if (!function.has_value() || *function == 0) {
+            check(false, "JNI table entry is populated with a guest thunk");
+            return std::pair{state, ExecutionResult{}};
+        }
+        state.r[7] = 1;
+        state.r[14] = 0x8000U;
+        auto result = interpreter.run(state, GuestAddress32{*function}, 16);
+        return std::pair{state, result};
+    };
+    const auto invoke_vm = [&](std::size_t index, GuestCpuState32 state) {
+        const auto function = memory.read_u32(GuestAddress32{vm_table + static_cast<std::uint32_t>(index * 4U)});
+        if (!function.has_value() || *function == 0) {
+            check(false, "JavaVM table entry is populated with a guest thunk");
+            return std::pair{state, ExecutionResult{}};
+        }
+        state.r[7] = 1;
+        state.r[14] = 0x8000U;
+        auto result = interpreter.run(state, GuestAddress32{*function}, 16);
+        return std::pair{state, result};
+    };
+
+    GuestCpuState32 state{};
+    state.r[0] = env;
+    auto [version_state, version_execution] = invoke_jni(4, state);
+    check(version_execution.status == ExecutionStatus::Completed && version_state.r[0] == 0x00010006U,
+        "JNI GetVersion executes through the guest function table");
+
+    state = {};
+    state.r[0] = env;
+    state.r[1] = 0x10000U;
+    auto [string_state, string_execution] = invoke_jni(167, state); // NewStringUTF
+    const auto string_handle = string_state.r[0];
+    check(string_execution.status == ExecutionStatus::Completed && string_handle != 0,
+        "JNI NewStringUTF creates a generation-checked guest handle");
+    state = {};
+    state.r[0] = env;
+    state.r[1] = string_handle;
+    auto [length_state, length_execution] = invoke_jni(164, state); // GetStringLength
+    check(length_execution.status == ExecutionStatus::Completed && length_state.r[0] == 11U,
+        "JNI GetStringLength counts UTF-16 code units");
+    state = {};
+    state.r[0] = env;
+    state.r[1] = string_handle;
+    state.r[2] = 0x10400U;
+    auto [chars_state, chars_execution] = invoke_jni(169, state); // GetStringUTFChars
+    std::array<std::byte, 13> utf8_readback{};
+    check(chars_execution.status == ExecutionStatus::Completed && chars_state.r[0] != 0
+            && memory.read(GuestAddress32{chars_state.r[0]}, utf8_readback)
+            && std::equal(utf8_readback.begin(), utf8_readback.end(),
+                std::array<std::byte, 13>{std::byte{'h'}, std::byte{'e'}, std::byte{'l'}, std::byte{'l'}, std::byte{'o'},
+                    std::byte{' '}, std::byte{0xe2}, std::byte{0x98}, std::byte{0x83}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}}.begin()),
+        "JNI GetStringUTFChars copies guest-visible UTF-8 bytes into the guest heap");
+    state = {};
+    state.r[0] = env;
+    state.r[1] = string_handle;
+    state.r[2] = chars_state.r[0];
+    auto [release_state, release_execution] = invoke_jni(170, state); // ReleaseStringUTFChars
+    check(release_execution.status == ExecutionStatus::Completed && release_state.r[0] == 0,
+        "JNI ReleaseStringUTFChars frees its tracked guest buffer");
+
+    state = {};
+    state.r[0] = env;
+    state.r[1] = string_handle;
+    auto [global_state, global_execution] = invoke_jni(21, state); // NewGlobalRef
+    const auto global_handle = global_state.r[0];
+    state = {};
+    state.r[0] = env;
+    state.r[1] = global_handle;
+    auto [kind_state, kind_execution] = invoke_jni(232, state); // GetObjectRefType
+    check(global_execution.status == ExecutionStatus::Completed && kind_execution.status == ExecutionStatus::Completed
+            && kind_state.r[0] == 2U,
+        "JNI global references remain opaque and report the correct reference kind");
+    state = {};
+    state.r[0] = env;
+    state.r[1] = global_handle;
+    (void)invoke_jni(22, state); // DeleteGlobalRef
+
+    state = {};
+    state.r[0] = env;
+    state.r[1] = 0x10100U;
+    auto [class_state, class_execution] = invoke_jni(6, state); // FindClass
+    const auto class_handle = class_state.r[0];
+    check(class_execution.status == ExecutionStatus::Completed && class_handle != 0,
+        "JNI FindClass produces an opaque class reference");
+    check(memory.write_u32(GuestAddress32{0x11000U}, 0x10200U)
+            && memory.write_u32(GuestAddress32{0x11004U}, 0x10300U)
+            && memory.write_u32(GuestAddress32{0x11008U}, 0x9000U),
+        "JNI native method descriptor is marshalled in the 32-bit guest ABI");
+    state = {};
+    state.r[0] = env;
+    state.r[1] = class_handle;
+    state.r[2] = 0x11000U;
+    state.r[3] = 1;
+    auto [register_state, register_execution] = invoke_jni(215, state); // RegisterNatives
+    check(register_execution.status == ExecutionStatus::Completed && register_state.r[0] == 0
+            && jni.registered_native_count() == 1U,
+        "JNI RegisterNatives validates guest strings and executable guest function addresses");
+    state = {};
+    state.r[0] = env;
+    state.r[1] = class_handle;
+    state.r[2] = 0x10200U;
+    state.r[3] = 0x10300U;
+    auto [method_state, method_execution] = invoke_jni(113, state); // GetStaticMethodID
+    check(method_execution.status == ExecutionStatus::Completed && method_state.r[0] >= 0xf3000000U,
+        "JNI method IDs are opaque guest-width identifiers, not host pointers");
+
+    state = {};
+    state.r[0] = vm;
+    state.r[1] = 0x10500U;
+    state.r[2] = 0x00010006U;
+    auto [getenv_state, getenv_execution] = invoke_vm(6, state); // GetEnv
+    check(getenv_execution.status == ExecutionStatus::Completed && getenv_state.r[0] == 0
+            && memory.read_u32(GuestAddress32{0x10500U}).value_or(0U) == env,
+        "JavaVM GetEnv returns the synthetic guest JNIEnv pointer");
+
+    state = {};
+    state.r[0] = env;
+    auto [unsupported_state, unsupported_execution] = invoke_jni(34, state); // CallObjectMethod (unsupported)
+    (void)unsupported_state;
+    state = {};
+    state.r[0] = env;
+    auto [exception_state, exception_execution] = invoke_jni(228, state); // ExceptionCheck
+    check(unsupported_execution.status == ExecutionStatus::Completed && exception_execution.status == ExecutionStatus::Completed
+            && exception_state.r[0] == 1U && !jni.pending_exception().empty(),
+        "unsupported JNI calls surface a pending exception rather than fabricating host objects");
+    state = {};
+    state.r[0] = env;
+    (void)invoke_jni(17, state); // ExceptionClear
+
+    jni.shutdown();
+    check(!jni.initialized() && !heap.allocation_size(GuestAddress32{jni_table}).has_value(),
+        "JNI shutdown unregisters thunks and releases its guest tables");
+    heap.shutdown();
+}
+
 void test_a32_t32_execution_svc_and_trampolines() {
     using namespace retrobridge::runtime;
     GuestMemory memory(0x10000);
@@ -808,6 +993,10 @@ void test_capabilities_and_optional_dbt_placeholder() {
         "the implemented ARM32 EABI syscall subset is reported available");
     check(!retrobridge::runtime::current_capabilities().bionic_and_guest_syscalls,
         "unimplemented Bionic symbols and syscalls are not reported as complete");
+    check(retrobridge::runtime::current_capabilities().synthetic_jni_tables_and_handle_subset,
+        "synthetic JNI/JavaVM tables and the tested handle subset are reported available");
+    check(!retrobridge::runtime::current_capabilities().synthetic_jni,
+        "partial JNI support is not reported as a complete virtual Java runtime");
     check(retrobridge::runtime::current_capabilities().arm32_instruction_execution,
         "bounded ARM instruction interpretation is reported available");
     check(!retrobridge::runtime::current_capabilities().arbitrary_guest_execution,
@@ -826,6 +1015,7 @@ int main() {
     test_native_vfs_io_and_descriptors();
     test_guest_heap_allocation_and_coalescing();
     test_arm32_syscall_dispatcher_and_guest_vfs();
+    test_synthetic_jni_java_vm_tables_and_handles();
     test_a32_t32_execution_svc_and_trampolines();
     test_capabilities_and_optional_dbt_placeholder();
     if (failures != 0) {

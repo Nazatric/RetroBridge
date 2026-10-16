@@ -32,7 +32,7 @@ RetroBridge is split so a later guest runtime can be developed without conflatin
 
 ### Guest references
 
-`HandleTable` demonstrates a generation-checked 32-bit handle to opaque 64-bit token mapping. It is not a synthetic `JNIEnv`, does not call ART, and does not yet model JNI local frames, weak-reference collection, exceptions, or callbacks.
+`HandleTable` maps guest-width handles to opaque host tokens. `GuestJniBridge` allocates 32-bit `JNIEnv`/`JavaVM` tables in guest memory, registers address-based trampolines, implements a tested string/array/reference/local-frame/exception subset, and validates guest `RegisterNatives` descriptors and executable entry points. It has no ART, class loader, Java-method engine, callback scheduler, GC, modified UTF-8, or concurrency; unsupported table slots set an explicit pending exception. This is not a virtual Android Java runtime or `JNI_OnLoad` launcher.
 
 ### Persistence and per-app storage
 
@@ -44,7 +44,7 @@ Each import gets `RetroBridge/apps/<package>/<uuid>/` so separate imports cannot
 2. Expand the interpreter subset or integrate a reviewed, licensed ARM32 DBT; add instruction/ABI tests and harden unsupported-instruction behavior.
 3. Implement dependency loading, TLS, and linker semantics on top of the current guest memory/ELF primitives; fuzz all untrusted ELF paths and relocate/test failures.
 4. Expand syscall/VFS coverage, harden host path race handling, and add guest ABI layout tests; never pass host pointers or host `long`/`size_t` layouts through guest registers.
-5. Implement system/JNI thunks, handles/strings/arrays/exceptions, and thread attach/detach with dedicated tests.
+5. Expand the synthetic JNI subset into a Java-facing thunk/callback layer, implement attach/detach and thread safety, and add dedicated cross-ABI tests.
 6. Add lifecycle IPC and framework proxying incrementally, with capability checks and per-API unsupported reports. Only after a separate security review consider enabling a constrained launch path.
 
 A completed earlier gate does not imply that a later gate or general Android framework compatibility is available.
