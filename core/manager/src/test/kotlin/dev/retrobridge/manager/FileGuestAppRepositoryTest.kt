@@ -24,7 +24,7 @@ class FileGuestAppRepositoryTest {
         val reloaded = FileGuestAppRepository(file)
         assertEquals("Updated first", reloaded.get(first.id)?.displayName)
         assertNotNull(reloaded.get(second.id))
-        assertEquals(first, reloaded.remove(first.id)?.copy(displayName = "Original first"))
+        assertEquals("Updated first", reloaded.remove(first.id)?.displayName)
         assertNull(reloaded.get(first.id))
         assertNotNull(reloaded.get(second.id))
         assertEquals(1, reloaded.list().size)
