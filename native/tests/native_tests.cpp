@@ -6,6 +6,7 @@
 #include "retrobridge/guest_lifecycle.h"
 #include "retrobridge/guest_heap.h"
 #include "retrobridge/guest_jni_bridge.h"
+#include "retrobridge/guest_bionic_thunks.h"
 #include "retrobridge/handle_table.h"
 #include "retrobridge/runtime_capabilities.h"
 #include "arm32_syscall_dispatcher.h"
@@ -712,6 +713,359 @@ void test_guest_heap_allocation_and_coalescing() {
     check(!memory.is_mapped(GuestAddress32{0x10000000U}), "heap shutdown unmaps its guest arena");
 }
 
+void test_guest_bionic_libc_libm_and_pthread_thunks() {
+    using namespace retrobridge::runtime;
+    constexpr std::uint32_t kReturnAddress = 0x8000U;
+    constexpr std::uint32_t kGuestData = 0x20000U;
+
+    GuestMemory memory(1024U * 1024U);
+    GuestHeap32 heap(memory);
+    check(heap.initialize(GuestAddress32{0x10000000U}, 64U * 1024U), "Bionic thunk guest heap initializes");
+    GuestTrampolineRegistry trampolines;
+    const std::array<std::byte, 4> return_code{std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xef}};
+    check(memory.map_bytes(GuestAddress32{kReturnAddress}, return_code, return_code.size(),
+        GuestPermission::Read | GuestPermission::Execute), "Bionic thunk return SVC maps executable");
+    check(memory.map_zeroed(GuestAddress32{kGuestData}, 0x4000U,
+        GuestPermission::Read | GuestPermission::Write), "Bionic thunk test buffers map read/write");
+
+    const auto root = std::filesystem::temp_directory_path()
+        / ("retrobridge-native-bionic-" + std::to_string(::getpid()));
+    std::error_code filesystem_error;
+    std::filesystem::remove_all(root, filesystem_error);
+    filesystem_error.clear();
+    std::filesystem::create_directories(root / "internal/files", filesystem_error);
+    check(!filesystem_error, "Bionic thunk VFS test root is created");
+    {
+        NativeVfs vfs(root, "org.retrobridge.native");
+        check(vfs.available(), "Bionic thunk VFS is available for an isolated app root");
+        GuestBionicThunks thunks(memory, heap, trampolines, &vfs);
+        std::string diagnostic;
+        check(thunks.install(&diagnostic), "Bionic/libc/libm/pthread thunk table installs");
+        if (!diagnostic.empty()) std::cerr << "Bionic thunk diagnostic: " << diagnostic << '\n';
+        check(thunks.installed(), "Bionic thunk table records its initialized state");
+        check(thunks.resolve_symbol("malloc").has_value() && thunks.resolve_symbol("pthread_mutex_lock").has_value()
+                && thunks.resolve_symbol("sqrtf").has_value(),
+            "Bionic symbol resolver exposes allocator, pthread, and libm functions");
+        check(thunks.resolve_guest_symbol("__stack_chk_guard").value_or(0U) == thunks.stack_guard_cell().value()
+                && thunks.resolve_data_symbol("errno").value_or(GuestAddress32{0}) == thunks.errno_cell(),
+            "guest symbol resolver returns data-cell addresses for stack guard and errno");
+
+        const auto svc = [](GuestCpuState32& state, std::uint32_t immediate, GuestMemory&) {
+            if (immediate == 0 && state.r[7] == 1) return GuestHookResult{GuestHookAction::Stop, "Bionic thunk return"};
+            return GuestHookResult{GuestHookAction::Fault, "unexpected Bionic thunk SVC"};
+        };
+        Arm32Interpreter interpreter(memory, trampolines, svc);
+        const auto invoke = [&](std::string_view name, GuestCpuState32 state) {
+            const auto function = thunks.resolve_symbol(name);
+            if (!function.has_value()) {
+                check(false, "Bionic test symbol resolves to a guest trampoline");
+                return std::pair{state, ExecutionResult{}};
+            }
+            state.r[7] = 1;
+            state.r[14] = kReturnAddress;
+            auto result = interpreter.run(state, GuestAddress32{*function}, 16);
+            check(result.status == ExecutionStatus::Completed, "Bionic thunk returns through guest execution");
+            return std::pair{state, result};
+        };
+        const auto write_guest_string = [&](std::uint32_t address, std::string_view text) {
+            std::vector<std::byte> bytes(text.size() + 1U, std::byte{0});
+            for (std::size_t index = 0; index < text.size(); ++index) {
+                bytes[index] = static_cast<std::byte>(static_cast<unsigned char>(text[index]));
+            }
+            return memory.write(GuestAddress32{address}, bytes);
+        };
+
+        GuestCpuState32 state{};
+        state.r[0] = 17;
+        auto [malloc_state, malloc_result] = invoke("malloc", state);
+        const auto allocated = GuestAddress32{malloc_state.r[0]};
+        check(malloc_result.status == ExecutionStatus::Completed && allocated.value() != 0
+                && (allocated.value() & 7U) == 0,
+            "guest malloc returns a non-null aligned 32-bit allocation");
+
+        state = {};
+        state.r[0] = 8;
+        state.r[1] = 4;
+        auto [calloc_state, calloc_result] = invoke("calloc", state);
+        std::array<std::byte, 32> zeroed{};
+        check(calloc_result.status == ExecutionStatus::Completed && calloc_state.r[0] != 0
+                && memory.read(GuestAddress32{calloc_state.r[0]}, zeroed)
+                && std::all_of(zeroed.begin(), zeroed.end(), [](std::byte value) { return value == std::byte{0}; }),
+            "guest calloc detects multiplication safely and zeroes guest memory");
+
+        if (allocated.value() != 0) {
+            const std::array<std::byte, 4> marker{std::byte{0x12}, std::byte{0x34}, std::byte{0x56}, std::byte{0x78}};
+            check(memory.write(allocated, marker), "guest malloc buffer is writable");
+            state = {};
+            state.r[0] = allocated.value();
+            state.r[1] = 128;
+            auto [realloc_state, realloc_result] = invoke("realloc", state);
+            std::array<std::byte, 4> retained{};
+            check(realloc_result.status == ExecutionStatus::Completed && realloc_state.r[0] != 0
+                    && memory.read(GuestAddress32{realloc_state.r[0]}, retained) && retained == marker,
+                "guest realloc grows an allocation while preserving its bytes");
+            state = {};
+            state.r[0] = realloc_state.r[0];
+            (void)invoke("free", state);
+        }
+        if (calloc_state.r[0] != 0) {
+            state = {};
+            state.r[0] = calloc_state.r[0];
+            (void)invoke("free", state);
+        }
+
+        state = {};
+        state.r[0] = 32;
+        state.r[1] = 64;
+        auto [aligned_state, aligned_result] = invoke("memalign", state);
+        check(aligned_result.status == ExecutionStatus::Completed && aligned_state.r[0] != 0
+                && (aligned_state.r[0] & 31U) == 0,
+            "guest memalign honors a valid power-of-two alignment");
+        state = {};
+        state.r[0] = kGuestData + 0x100U;
+        state.r[1] = 0x5aU;
+        state.r[2] = 8;
+        auto [memset_state, memset_result] = invoke("memset", state);
+        std::array<std::byte, 8> filled{};
+        check(memset_result.status == ExecutionStatus::Completed && memset_state.r[0] == kGuestData + 0x100U
+                && memory.read(GuestAddress32{kGuestData + 0x100U}, filled)
+                && std::all_of(filled.begin(), filled.end(), [](std::byte value) { return value == std::byte{0x5a}; }),
+            "libc memset fills guest memory and returns the destination");
+        state = {};
+        state.r[0] = kGuestData + 0x100U;
+        state.r[1] = 8;
+        state.r[2] = 0x33U;
+        (void)invoke("__aeabi_memset", state);
+        check(memory.read(GuestAddress32{kGuestData + 0x100U}, filled)
+                && std::all_of(filled.begin(), filled.end(), [](std::byte value) { return value == std::byte{0x33}; }),
+            "ARM EABI memset uses its destination, length, value argument order");
+        state = {};
+        state.r[0] = kGuestData + 0x100U;
+        state.r[1] = 8;
+        (void)invoke("__aeabi_memclr", state);
+        check(memory.read(GuestAddress32{kGuestData + 0x100U}, filled)
+                && std::all_of(filled.begin(), filled.end(), [](std::byte value) { return value == std::byte{0}; }),
+            "ARM EABI memclr zeroes a guest buffer");
+
+        check(write_guest_string(kGuestData + 0x200U, "guest")
+                && write_guest_string(kGuestData + 0x220U, "guest")
+                && write_guest_string(kGuestData + 0x240U, "guest!"),
+            "Bionic string fixtures are staged in guest memory");
+        state = {};
+        state.r[0] = kGuestData + 0x200U;
+        auto [strlen_state, strlen_result] = invoke("strlen", state);
+        check(strlen_result.status == ExecutionStatus::Completed && strlen_state.r[0] == 5U,
+            "guest strlen counts bytes up to the terminating NUL");
+        state = {};
+        state.r[0] = kGuestData + 0x200U;
+        state.r[1] = kGuestData + 0x220U;
+        auto [strcmp_equal, strcmp_equal_result] = invoke("strcmp", state);
+        check(strcmp_equal_result.status == ExecutionStatus::Completed && strcmp_equal.r[0] == 0,
+            "guest strcmp reports equal strings");
+        state = {};
+        state.r[0] = kGuestData + 0x200U;
+        state.r[1] = kGuestData + 0x240U;
+        state.r[2] = 5;
+        auto [strncmp_equal, strncmp_result] = invoke("strncmp", state);
+        check(strncmp_result.status == ExecutionStatus::Completed && strncmp_equal.r[0] == 0,
+            "guest strncmp compares at most the requested bytes");
+        state = {};
+        state.r[0] = kGuestData + 0x260U;
+        state.r[1] = kGuestData + 0x200U;
+        state.r[2] = 4;
+        (void)invoke("strncpy", state);
+        std::array<std::byte, 4> copied_string{};
+        check(memory.read(GuestAddress32{kGuestData + 0x260U}, copied_string)
+                && copied_string == std::array<std::byte, 4>{std::byte{'g'}, std::byte{'u'}, std::byte{'e'}, std::byte{'s'}},
+            "guest strncpy copies a bounded non-NUL-terminated prefix");
+        state = {};
+        state.r[0] = kGuestData + 0x200U;
+        auto [strdup_state, strdup_result] = invoke("strdup", state);
+        std::array<std::byte, 6> duplicated{};
+        check(strdup_result.status == ExecutionStatus::Completed && strdup_state.r[0] != 0
+                && memory.read(GuestAddress32{strdup_state.r[0]}, duplicated)
+                && duplicated == std::array<std::byte, 6>{std::byte{'g'}, std::byte{'u'}, std::byte{'e'}, std::byte{'s'}, std::byte{'t'}, std::byte{0}},
+            "guest strdup allocates and copies the terminating NUL");
+        state = {};
+        state.r[0] = strdup_state.r[0];
+        (void)invoke("free", state);
+
+        const std::array<std::byte, 5> overlap_source{std::byte{'a'}, std::byte{'b'}, std::byte{'c'}, std::byte{'d'}, std::byte{'e'}};
+        check(memory.write(GuestAddress32{kGuestData + 0x300U}, overlap_source), "memmove overlap fixture is staged");
+        state = {};
+        state.r[0] = kGuestData + 0x301U;
+        state.r[1] = kGuestData + 0x300U;
+        state.r[2] = 4;
+        (void)invoke("memmove", state);
+        std::array<std::byte, 5> overlap_result{};
+        check(memory.read(GuestAddress32{kGuestData + 0x300U}, overlap_result)
+                && overlap_result == std::array<std::byte, 5>{std::byte{'a'}, std::byte{'a'}, std::byte{'b'}, std::byte{'c'}, std::byte{'d'}},
+            "guest memmove handles overlapping ranges using bounded staging");
+
+        state = {};
+        state.r[0] = std::bit_cast<std::uint32_t>(9.0F);
+        auto [sqrt_state, sqrt_result] = invoke("sqrtf", state);
+        check(sqrt_result.status == ExecutionStatus::Completed
+                && std::bit_cast<float>(sqrt_state.r[0]) == 3.0F,
+            "libm sqrtf computes using ARM32 single-precision register arguments");
+        state = {};
+        state.r[0] = std::bit_cast<std::uint32_t>(2.0F);
+        state.r[1] = std::bit_cast<std::uint32_t>(3.0F);
+        auto [pow_state, pow_result] = invoke("powf", state);
+        check(pow_result.status == ExecutionStatus::Completed
+                && std::bit_cast<float>(pow_state.r[0]) == 8.0F,
+            "libm powf computes from two guest single-precision arguments");
+        state = {};
+        state.r[0] = 17;
+        state.r[1] = 5;
+        auto [div_state, div_result] = invoke("__aeabi_idivmod", state);
+        check(div_result.status == ExecutionStatus::Completed && div_state.r[0] == 3U && div_state.r[1] == 2U,
+            "ARM EABI signed division helper returns quotient and remainder");
+
+        const auto mutex_address = heap.malloc(64);
+        check(mutex_address.has_value(), "guest memory for a synthetic pthread mutex allocates");
+        if (mutex_address.has_value()) {
+            state = {};
+            state.r[0] = mutex_address->value();
+            auto [mutex_init_state, mutex_init_result] = invoke("pthread_mutex_init", state);
+            check(mutex_init_result.status == ExecutionStatus::Completed && mutex_init_state.r[0] == 0,
+                "pthread mutex initializer creates a host-backed guest mutex object");
+            state = {};
+            state.r[0] = mutex_address->value();
+            auto [lock_state, lock_result] = invoke("pthread_mutex_lock", state);
+            check(lock_result.status == ExecutionStatus::Completed && lock_state.r[0] == 0,
+                "pthread mutex lock acquires a free guest mutex");
+            state = {};
+            state.r[0] = mutex_address->value();
+            auto [recursive_lock_state, recursive_lock_result] = invoke("pthread_mutex_lock", state);
+            check(recursive_lock_result.status == ExecutionStatus::Completed && recursive_lock_state.r[0] == 35U,
+                "pthread mutex lock reports EDEADLK instead of hanging without a guest scheduler");
+            state = {};
+            state.r[0] = mutex_address->value();
+            auto [try_state, try_result] = invoke("pthread_mutex_trylock", state);
+            check(try_result.status == ExecutionStatus::Completed && try_state.r[0] == 16U,
+                "pthread mutex trylock reports EBUSY for a locked mutex");
+            state = {};
+            state.r[0] = mutex_address->value();
+            auto [unlock_state, unlock_result] = invoke("pthread_mutex_unlock", state);
+            check(unlock_result.status == ExecutionStatus::Completed && unlock_state.r[0] == 0,
+                "pthread mutex unlock releases the guest mutex");
+            state = {};
+            state.r[0] = mutex_address->value();
+            auto [destroy_state, destroy_result] = invoke("pthread_mutex_destroy", state);
+            check(destroy_result.status == ExecutionStatus::Completed && destroy_state.r[0] == 0,
+                "pthread mutex destroy drops its host-side state");
+            check(heap.free(*mutex_address), "guest pthread mutex backing storage frees");
+        }
+
+        state = {};
+        state.r[0] = kGuestData + 0x380U;
+        auto [key_state, key_result] = invoke("pthread_key_create", state);
+        const auto key = memory.read_u32(GuestAddress32{kGuestData + 0x380U}).value_or(0U);
+        check(key_result.status == ExecutionStatus::Completed && key_state.r[0] == 0 && key != 0,
+            "pthread TLS key creation writes a synthetic guest key");
+        state = {};
+        state.r[0] = key;
+        state.r[1] = 0x12345678U;
+        auto [set_state, set_result] = invoke("pthread_setspecific", state);
+        state = {};
+        state.r[0] = key;
+        auto [get_state, get_result] = invoke("pthread_getspecific", state);
+        check(set_result.status == ExecutionStatus::Completed && set_state.r[0] == 0
+                && get_result.status == ExecutionStatus::Completed && get_state.r[0] == 0x12345678U,
+            "pthread TLS stores and retrieves an opaque guest-width value");
+        state = {};
+        state.r[0] = key;
+        auto [delete_key_state, delete_key_result] = invoke("pthread_key_delete", state);
+        check(delete_key_result.status == ExecutionStatus::Completed && delete_key_state.r[0] == 0,
+            "pthread TLS key deletion clears its synthetic value");
+        state = {};
+        state.r[0] = 0;
+        state.r[1] = 0;
+        state.r[2] = 0;
+        state.r[3] = 0;
+        auto [create_thread_state, create_thread_result] = invoke("pthread_create", state);
+        check(create_thread_result.status == ExecutionStatus::Completed && create_thread_state.r[0] == 11U,
+            "unsupported pthread_create returns EAGAIN instead of fabricating a guest thread");
+
+        check(write_guest_string(kGuestData + 0x400U, "/data/user/0/org.retrobridge.native/files/guest.bin"),
+            "guest VFS file path is staged");
+        state = {};
+        state.r[0] = kGuestData + 0x400U;
+        state.r[1] = static_cast<std::uint32_t>(O_CREAT | O_RDWR | O_TRUNC);
+        state.r[2] = 0600;
+        auto [open_state, open_result] = invoke("open", state);
+        const auto guest_fd = std::bit_cast<std::int32_t>(open_state.r[0]);
+        check(open_result.status == ExecutionStatus::Completed && guest_fd >= 3,
+            "guest libc open uses the app-private VFS descriptor table");
+        if (guest_fd >= 0) {
+            const std::array<std::byte, 6> file_bytes{std::byte{'r'}, std::byte{'u'}, std::byte{'n'}, std::byte{'t'}, std::byte{'i'}, std::byte{'m'}};
+            check(memory.write(GuestAddress32{kGuestData + 0x500U}, file_bytes), "guest VFS write bytes are staged");
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(guest_fd);
+            state.r[1] = kGuestData + 0x500U;
+            state.r[2] = static_cast<std::uint32_t>(file_bytes.size());
+            auto [write_state, write_result] = invoke("write", state);
+            check(write_result.status == ExecutionStatus::Completed && write_state.r[0] == file_bytes.size(),
+                "guest libc write persists bytes through the VFS");
+
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(guest_fd);
+            state.r[1] = 2;
+            state.r[2] = 0;
+            auto [seek_state, seek_result] = invoke("lseek", state);
+            check(seek_result.status == ExecutionStatus::Completed && seek_state.r[0] == 2U,
+                "guest 32-bit lseek repositions a VFS descriptor");
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(guest_fd);
+            state.r[1] = 0;
+            state.r[2] = 0;
+            state.r[3] = 1;
+            state.r[13] = kGuestData + 0x600U;
+            check(memory.write_u32(GuestAddress32{kGuestData + 0x600U}, 0), "lseek64 stack whence argument is staged");
+            auto [seek64_state, seek64_result] = invoke("lseek64", state);
+            check(seek64_result.status == ExecutionStatus::Completed && seek64_state.r[0] == 0U && seek64_state.r[1] == 1U,
+                "guest lseek64 marshals an aligned ARM32 64-bit offset and stack whence");
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(guest_fd);
+            state.r[1] = 0;
+            state.r[2] = 0;
+            (void)invoke("lseek", state);
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(guest_fd);
+            state.r[1] = kGuestData + 0x520U;
+            state.r[2] = static_cast<std::uint32_t>(file_bytes.size());
+            auto [read_state, read_result] = invoke("read", state);
+            std::array<std::byte, 6> readback{};
+            check(read_result.status == ExecutionStatus::Completed && read_state.r[0] == file_bytes.size()
+                    && memory.read(GuestAddress32{kGuestData + 0x520U}, readback) && readback == file_bytes,
+                "guest libc read copies descriptor bytes back into guest memory");
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(guest_fd);
+            auto [close_state, close_result] = invoke("close", state);
+            check(close_result.status == ExecutionStatus::Completed && close_state.r[0] == 0,
+                "guest libc close releases its virtual descriptor");
+        }
+        check(write_guest_string(kGuestData + 0x700U, "/data/user/0/org.retrobridge.native/files/../../escape"),
+            "unsafe guest path fixture is staged");
+        state = {};
+        state.r[0] = kGuestData + 0x700U;
+        state.r[1] = static_cast<std::uint32_t>(O_RDONLY);
+        auto [unsafe_open_state, unsafe_open_result] = invoke("open", state);
+        (void)unsafe_open_result;
+        check(std::bit_cast<std::int32_t>(unsafe_open_state.r[0]) == -1
+                && memory.read_u32(thunks.errno_cell()).value_or(0U) != 0,
+            "guest libc open rejects traversal and records a guest errno");
+
+        thunks.shutdown();
+        check(!thunks.installed() && !thunks.resolve_symbol("malloc").has_value(),
+            "Bionic thunk shutdown unregisters functions and clears the symbol resolver");
+    }
+    heap.shutdown();
+    std::filesystem::remove_all(root, filesystem_error);
+    check(!filesystem_error, "Bionic thunk VFS test root is cleaned up");
+}
+
 void test_synthetic_jni_java_vm_tables_and_handles() {
     using namespace retrobridge::runtime;
     GuestMemory memory(1024U * 1024U);
@@ -991,8 +1345,10 @@ void test_capabilities_and_optional_dbt_placeholder() {
         "native app-private guest VFS is reported available");
     check(retrobridge::runtime::current_capabilities().arm32_eabi_syscall_subset,
         "the implemented ARM32 EABI syscall subset is reported available");
+    check(retrobridge::runtime::current_capabilities().guest_bionic_libc_libm_pthread_thunks,
+        "the explicitly partial Bionic/libc/libm/pthread thunk subset is reported available");
     check(!retrobridge::runtime::current_capabilities().bionic_and_guest_syscalls,
-        "unimplemented Bionic symbols and syscalls are not reported as complete");
+        "the partial thunk/syscall coverage is not reported as complete Bionic support");
     check(retrobridge::runtime::current_capabilities().synthetic_jni_tables_and_handle_subset,
         "synthetic JNI/JavaVM tables and the tested handle subset are reported available");
     check(!retrobridge::runtime::current_capabilities().synthetic_jni,
@@ -1015,6 +1371,7 @@ int main() {
     test_native_vfs_io_and_descriptors();
     test_guest_heap_allocation_and_coalescing();
     test_arm32_syscall_dispatcher_and_guest_vfs();
+    test_guest_bionic_libc_libm_and_pthread_thunks();
     test_synthetic_jni_java_vm_tables_and_handles();
     test_a32_t32_execution_svc_and_trampolines();
     test_capabilities_and_optional_dbt_placeholder();
