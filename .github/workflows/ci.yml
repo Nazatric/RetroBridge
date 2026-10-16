@@ -140,6 +140,10 @@ jobs:
               echo "::error title=RetroBridge diagnostic base64 ($log)::$message"
             fi
           done
+          test_failures="$(find . -path '*/build/test-results/*/*.xml' -type f -exec grep -H -n -A 12 -B 2 -E '<failure|<error' {} + || true)"
+          if [[ -n "$test_failures" ]]; then
+            echo "::error title=RetroBridge JUnit failures base64::$(printf '%s' "$test_failures" | base64 -w0)"
+          fi
 
       - name: Upload APKs, ELF fixtures, test binaries, and diagnostics
         if: always()
