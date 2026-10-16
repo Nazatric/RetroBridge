@@ -149,6 +149,35 @@ std::optional<std::uint64_t> GuestAndroidWindowThunks::posted_frame_count(std::u
     return found == nullptr ? std::nullopt : std::optional<std::uint64_t>{found->posted_frames};
 }
 
+std::optional<HeadlessNativeWindowSnapshot32> GuestAndroidWindowThunks::snapshot_window(std::uint32_t window) const noexcept {
+    std::lock_guard lock(state_mutex_);
+    const auto* found = find_window(window);
+    if (found == nullptr) return std::nullopt;
+    return HeadlessNativeWindowSnapshot32{found->width, found->height, found->format, found->pixels, found->locked};
+}
+
+bool GuestAndroidWindowThunks::retain_headless_window(std::uint32_t window) noexcept {
+    std::lock_guard lock(state_mutex_);
+    auto* found = find_window(window);
+    if (found == nullptr || found->references == std::numeric_limits<std::uint32_t>::max()) return false;
+    ++found->references;
+    return true;
+}
+
+void GuestAndroidWindowThunks::release_headless_window(std::uint32_t window) noexcept {
+    GuestCpuState32 state{};
+    state.r[0] = window;
+    (void)release(state);
+}
+
+bool GuestAndroidWindowThunks::post_headless_frame(std::uint32_t window) noexcept {
+    std::lock_guard lock(state_mutex_);
+    auto* found = find_window(window);
+    if (found == nullptr || found->locked) return false;
+    if (found->posted_frames < std::numeric_limits<std::uint64_t>::max()) ++found->posted_frames;
+    return true;
+}
+
 std::optional<std::uint32_t> GuestAndroidWindowThunks::add_thunk(std::string name, Callback callback) {
     if (symbols_.contains(name) || next_trampoline_address_ > std::numeric_limits<std::uint32_t>::max() - 4U) {
         return std::nullopt;
@@ -234,7 +263,7 @@ const GuestAndroidWindowThunks::Window* GuestAndroidWindowThunks::find_window(st
 std::optional<std::size_t> GuestAndroidWindowThunks::buffer_size(
     std::uint32_t width,
     std::uint32_t height) const noexcept {
-    if (width == 0 || height == 0) return std::nullopt;
+    if (width == 0 || height == 0 || width > kMaxSurfaceDimension || height > kMaxSurfaceDimension) return std::nullopt;
     const auto pixels = static_cast<std::uint64_t>(width) * height;
     if (pixels > kMaxSurfacePixels || pixels > std::numeric_limits<std::size_t>::max() / 4U) return std::nullopt;
     return static_cast<std::size_t>(pixels * 4U);
@@ -469,7 +498,7 @@ GuestHookResult GuestAndroidWindowThunks::unlock_and_post(GuestCpuState32& state
         return {};
     }
     window->locked = false;
-    ++window->posted_frames;
+    if (window->posted_frames < std::numeric_limits<std::uint64_t>::max()) ++window->posted_frames;
     state.r[0] = 0;
     return {};
 }

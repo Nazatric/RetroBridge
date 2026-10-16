@@ -38,6 +38,10 @@ class CompatibilityReportTest {
             report.getValue("Synthetic AInputQueue and ALooper subset").status,
         )
         assertEquals(
+            CapabilityStatus.PARTIAL,
+            report.getValue("Headless EGL/GLES clear subset").status,
+        )
+        assertEquals(
             CapabilityStatus.NOT_IMPLEMENTED,
             report.getValue("Execution of arbitrary guest APKs").status,
         )
@@ -45,11 +49,10 @@ class CompatibilityReportTest {
     }
 
     @Test
-    fun marksNdkGraphicsAudioAndFrameworkBridgesUnavailable() {
+    fun marksAudioAndFrameworkBridgesUnavailable() {
         val report = CompatibilityReport.capabilities.associateBy(Capability::name)
 
         listOf(
-            "Headless GLES/EGL",
             "OpenSL ES audio",
             "Guest IPC and Android framework virtualization",
         ).forEach { name ->

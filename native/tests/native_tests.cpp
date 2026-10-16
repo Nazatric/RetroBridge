@@ -10,6 +10,7 @@
 #include "retrobridge/guest_android_asset_thunks.h"
 #include "retrobridge/guest_android_window_thunks.h"
 #include "retrobridge/guest_android_input_thunks.h"
+#include "retrobridge/guest_headless_gles_egl_thunks.h"
 #include "retrobridge/handle_table.h"
 #include "retrobridge/runtime_capabilities.h"
 #include "arm32_syscall_dispatcher.h"
@@ -1271,8 +1272,9 @@ void test_headless_native_window_buffers_and_lifecycle() {
             && windows.resolve_symbol("ANativeWindow_setBuffersGeometry").has_value(),
         "headless window bridge resolves buffer and geometry APIs");
     check(!windows.create_headless_window(0, 4).has_value()
-            && !windows.create_headless_window(4, 4, 4).has_value(),
-        "headless window factory rejects empty dimensions and unsupported pixel formats");
+            && !windows.create_headless_window(4, 4, 4).has_value()
+            && !windows.create_headless_window(4097, 1).has_value(),
+        "headless window factory rejects empty dimensions, unsupported formats, and oversized sides");
     const auto handle = windows.create_headless_window(4, 3, GuestAndroidWindowThunks::kRgba8888, &diagnostic);
     check(handle.has_value() && *handle != 0 && heap.allocation_size(GuestAddress32{*handle}).has_value(),
         "headless window is represented by a guest-heap opaque handle");
@@ -1677,6 +1679,224 @@ void test_synthetic_android_input_queue_and_looper() {
         "ALooper_addFd explicitly rejects unsupported host file-descriptor polling");
 }
 
+void test_headless_egl_gles_clear_subset() {
+    using namespace retrobridge::runtime;
+    constexpr std::uint32_t kReturnAddress = 0x8000U;
+    constexpr std::uint32_t kGuestData = 0x10000U;
+
+    GuestMemory memory(12U * 1024U * 1024U);
+    std::vector<std::byte> return_code(4, std::byte{0});
+    put_u32(return_code, 0, 0xef000000U);
+    check(memory.map_bytes(GuestAddress32{kReturnAddress}, return_code, return_code.size(),
+        GuestPermission::Read | GuestPermission::Execute), "headless EGL return sentinel maps RX");
+    check(memory.map_zeroed(GuestAddress32{kGuestData}, 0x4000U,
+        GuestPermission::Read | GuestPermission::Write), "headless EGL attribute/output memory maps RW");
+    GuestHeap32 heap(memory);
+    check(heap.initialize(GuestAddress32{0x30000U}, 4U * 1024U * 1024U), "headless EGL guest heap initializes");
+
+    GuestTrampolineRegistry trampolines;
+    GuestAndroidWindowThunks windows(memory, heap, trampolines);
+    GuestHeadlessGlesEglThunks gles(memory, heap, trampolines, windows);
+    std::string diagnostic;
+    check(windows.install(&diagnostic), "headless EGL test installs native-window thunks");
+    const auto window = windows.create_headless_window(4, 3, GuestAndroidWindowThunks::kRgba8888, &diagnostic);
+    check(window.has_value(), "headless EGL test creates an offscreen RGBA window");
+    if (!window.has_value()) return;
+    const auto gles_installed = gles.install(&diagnostic);
+    check(gles_installed, "bounded EGL/GLES clear-only thunk table installs");
+    if (!gles_installed) return;
+    check(gles.resolve_symbol("eglChooseConfig").has_value()
+            && gles.resolve_symbol("eglCreateWindowSurface").has_value()
+            && gles.resolve_symbol("glClear").has_value()
+            && gles.resolve_symbol("glScissor").has_value(),
+        "headless renderer resolves EGL, clear, and scissor APIs");
+
+    const auto svc = [](GuestCpuState32& state, std::uint32_t immediate, GuestMemory&) {
+        if (immediate == 0 && state.r[7] == 1) return GuestHookResult{GuestHookAction::Stop, "EGL thunk return"};
+        return GuestHookResult{GuestHookAction::Fault, "unexpected EGL thunk SVC"};
+    };
+    Arm32Interpreter interpreter(memory, trampolines, svc);
+    const auto invoke = [&](std::string_view name, GuestCpuState32 state) {
+        const auto function = gles.resolve_symbol(name);
+        if (!function.has_value()) {
+            check(false, "EGL/GLES test symbol resolves to a guest trampoline");
+            return std::pair{state, ExecutionResult{}};
+        }
+        state.r[7] = 1;
+        state.r[14] = kReturnAddress;
+        auto result = interpreter.run(state, GuestAddress32{*function}, 16);
+        check(result.status == ExecutionStatus::Completed, "EGL/GLES thunk returns through guest execution");
+        return std::pair{state, result};
+    };
+
+    GuestCpuState32 state{};
+    state.r[0] = 0; // EGL_DEFAULT_DISPLAY
+    auto [display_state, display_result] = invoke("eglGetDisplay", state);
+    const auto display = display_state.r[0];
+    check(display_result.status == ExecutionStatus::Completed && display != 0,
+        "eglGetDisplay returns a synthetic guest display handle");
+    state = {};
+    state.r[0] = display;
+    state.r[1] = 0x10100U;
+    state.r[2] = 0x10104U;
+    auto [initialize_state, initialize_result] = invoke("eglInitialize", state);
+    check(initialize_result.status == ExecutionStatus::Completed && initialize_state.r[0] == 1U
+            && memory.read_u32(GuestAddress32{0x10100U}).value_or(0U) == 1U
+            && memory.read_u32(GuestAddress32{0x10104U}).value_or(0U) == 4U,
+        "eglInitialize reports a bounded EGL 1.4 display");
+
+    const std::array<std::uint32_t, 5> config_attributes{
+        0x3033U, 0x0004U, // EGL_SURFACE_TYPE = EGL_WINDOW_BIT
+        0x3040U, 0x0004U, // EGL_RENDERABLE_TYPE = EGL_OPENGL_ES2_BIT
+        GuestHeadlessGlesEglThunks::kEglNone,
+    };
+    for (std::size_t index = 0; index < config_attributes.size(); ++index) {
+        check(memory.write_u32(GuestAddress32{0x10200U + static_cast<std::uint32_t>(index * 4U)}, config_attributes[index]),
+            "write bounded EGL config attributes");
+    }
+    check(memory.write_u32(GuestAddress32{0x10300U}, 0x10244U), "write EGL choose-config stack argument");
+    state = {};
+    state.r[0] = display;
+    state.r[1] = 0x10200U;
+    state.r[2] = 0x10240U;
+    state.r[3] = 1U;
+    state.r[13] = 0x10300U;
+    auto [choose_state, choose_result] = invoke("eglChooseConfig", state);
+    const auto config = memory.read_u32(GuestAddress32{0x10240U}).value_or(0U);
+    check(choose_result.status == ExecutionStatus::Completed && choose_state.r[0] == 1U
+            && config != 0 && memory.read_u32(GuestAddress32{0x10244U}).value_or(0U) == 1U,
+        "eglChooseConfig validates window/ES2 attributes and returns one synthetic config");
+    state = {};
+    state.r[0] = display;
+    state.r[1] = config;
+    state.r[2] = 0x3024U; // EGL_RED_SIZE
+    state.r[3] = 0x10248U;
+    auto [config_attrib_state, config_attrib_result] = invoke("eglGetConfigAttrib", state);
+    check(config_attrib_result.status == ExecutionStatus::Completed && config_attrib_state.r[0] == 1U
+            && memory.read_u32(GuestAddress32{0x10248U}).value_or(0U) == 8U,
+        "eglGetConfigAttrib reports an RGBA8888 config");
+
+    state = {};
+    state.r[0] = display;
+    state.r[1] = config;
+    state.r[2] = *window;
+    auto [surface_state, surface_result] = invoke("eglCreateWindowSurface", state);
+    const auto surface = surface_state.r[0];
+    check(surface_result.status == ExecutionStatus::Completed && surface != 0,
+        "eglCreateWindowSurface retains the headless ANativeWindow through an opaque surface handle");
+    state = {};
+    state.r[0] = GuestHeadlessGlesEglThunks::kEglOpenGlesApi;
+    auto [bind_api_state, bind_api_result] = invoke("eglBindAPI", state);
+    check(bind_api_result.status == ExecutionStatus::Completed && bind_api_state.r[0] == 1U,
+        "eglBindAPI selects OpenGL ES");
+
+    const std::array<std::uint32_t, 3> context_attributes{
+        0x3098U, 2U, GuestHeadlessGlesEglThunks::kEglNone,
+    };
+    for (std::size_t index = 0; index < context_attributes.size(); ++index) {
+        check(memory.write_u32(GuestAddress32{0x10280U + static_cast<std::uint32_t>(index * 4U)}, context_attributes[index]),
+            "write bounded EGL context attributes");
+    }
+    state = {};
+    state.r[0] = display;
+    state.r[1] = config;
+    state.r[2] = 0;
+    state.r[3] = 0x10280U;
+    auto [context_state, context_result] = invoke("eglCreateContext", state);
+    const auto context = context_state.r[0];
+    check(context_result.status == ExecutionStatus::Completed && context != 0,
+        "eglCreateContext creates a synthetic OpenGL ES 2 context");
+    state = {};
+    state.r[0] = display;
+    state.r[1] = surface;
+    state.r[2] = surface;
+    state.r[3] = context;
+    auto [make_current_state, make_current_result] = invoke("eglMakeCurrent", state);
+    check(make_current_result.status == ExecutionStatus::Completed && make_current_state.r[0] == 1U,
+        "eglMakeCurrent binds one window surface for draw and read");
+
+    state = {};
+    state.r[0] = std::bit_cast<std::uint32_t>(1.0F);
+    state.r[1] = std::bit_cast<std::uint32_t>(0.0F);
+    state.r[2] = std::bit_cast<std::uint32_t>(0.0F);
+    state.r[3] = std::bit_cast<std::uint32_t>(1.0F);
+    (void)invoke("glClearColor", state);
+    state = {};
+    state.r[0] = GuestHeadlessGlesEglThunks::kGlColorBufferBit;
+    (void)invoke("glClear", state);
+    const auto pixels = windows.pixel_buffer(*window);
+    check(pixels.has_value(), "headless EGL surface retains a guest-mapped color buffer");
+    if (!pixels.has_value()) return;
+    std::array<std::byte, 4> first_pixel{};
+    check(memory.read(*pixels, first_pixel)
+            && first_pixel == std::array<std::byte, 4>{std::byte{0xff}, std::byte{0}, std::byte{0}, std::byte{0xff}},
+        "glClear writes a red RGBA8888 color across the software surface");
+
+    state = {};
+    state.r[0] = GuestHeadlessGlesEglThunks::kGlScissorTest;
+    (void)invoke("glEnable", state);
+    state = {};
+    state.r[0] = 1;
+    state.r[1] = 1;
+    state.r[2] = 1;
+    state.r[3] = 1;
+    (void)invoke("glScissor", state);
+    state = {};
+    state.r[0] = std::bit_cast<std::uint32_t>(0.0F);
+    state.r[1] = std::bit_cast<std::uint32_t>(1.0F);
+    state.r[2] = std::bit_cast<std::uint32_t>(0.0F);
+    state.r[3] = std::bit_cast<std::uint32_t>(1.0F);
+    (void)invoke("glClearColor", state);
+    state = {};
+    state.r[0] = GuestHeadlessGlesEglThunks::kGlColorBufferBit;
+    (void)invoke("glClear", state);
+    const auto scissored_pixel_address = pixels->checked_add(20U);
+    std::array<std::byte, 4> scissored_pixel{};
+    check(scissored_pixel_address.has_value() && memory.read(*scissored_pixel_address, scissored_pixel)
+            && scissored_pixel == std::array<std::byte, 4>{std::byte{0}, std::byte{0xff}, std::byte{0}, std::byte{0xff}}
+            && memory.read(*pixels, first_pixel)
+            && first_pixel == std::array<std::byte, 4>{std::byte{0xff}, std::byte{0}, std::byte{0}, std::byte{0xff}},
+        "scissored glClear updates only the selected bottom-left-origin rectangle");
+
+    state = {};
+    state.r[0] = 0x1f02U; // GL_VERSION
+    auto [version_state, version_result] = invoke("glGetString", state);
+    check(version_result.status == ExecutionStatus::Completed && version_state.r[0] != 0
+            && memory.read_u8(GuestAddress32{version_state.r[0]}).value_or(0U) == static_cast<std::uint8_t>('O'),
+        "glGetString returns a guest-memory GLES version string");
+    state = {};
+    state.r[0] = 0xdeadU;
+    (void)invoke("glEnable", state);
+    state = {};
+    auto [gl_error_state, gl_error_result] = invoke("glGetError", state);
+    check(gl_error_result.status == ExecutionStatus::Completed && gl_error_state.r[0] == 0x0500U,
+        "GLES subset records and clears GL_INVALID_ENUM");
+
+    state = {};
+    state.r[0] = display;
+    state.r[1] = surface;
+    auto [swap_state, swap_result] = invoke("eglSwapBuffers", state);
+    check(swap_result.status == ExecutionStatus::Completed && swap_state.r[0] == 1U
+            && windows.posted_frame_count(*window).value_or(0) == 1U,
+        "eglSwapBuffers posts a rendered headless frame");
+    state = {};
+    state.r[0] = display;
+    state.r[1] = surface;
+    (void)invoke("eglDestroySurface", state);
+    state = {};
+    state.r[0] = display;
+    state.r[1] = context;
+    (void)invoke("eglDestroyContext", state);
+    state = {};
+    state.r[0] = display;
+    auto [terminate_state, terminate_result] = invoke("eglTerminate", state);
+    check(terminate_result.status == ExecutionStatus::Completed && terminate_state.r[0] == 1U,
+        "eglTerminate tears down the synthetic display state");
+    windows.release_headless_window(*window);
+    check(!windows.pixel_buffer(*window).has_value(),
+        "EGL surface destruction releases its native-window reference");
+}
+
 void test_synthetic_jni_java_vm_tables_and_handles() {
     using namespace retrobridge::runtime;
     GuestMemory memory(1024U * 1024U);
@@ -2039,8 +2259,8 @@ void test_capabilities_and_optional_dbt_placeholder() {
         "bounded headless native-window buffers are reported as a narrow capability");
     check(retrobridge::runtime::current_capabilities().synthetic_android_input_queue_looper_subset,
         "the synthetic host-injected AInputQueue/ALooper subset is reported as available");
-    check(!retrobridge::runtime::current_capabilities().headless_gles_egl,
-        "headless GLES/EGL remains explicitly unavailable");
+    check(retrobridge::runtime::current_capabilities().headless_gles_egl_clear_subset,
+        "the explicit headless EGL/GLES clear-only subset is reported available");
     check(!retrobridge::runtime::current_capabilities().opensl_es_audio_thunks,
         "OpenSL ES audio remains explicitly unavailable");
     check(retrobridge::runtime::current_capabilities().arm32_instruction_execution,
@@ -2065,6 +2285,7 @@ int main() {
     test_guest_android_asset_thunks();
     test_headless_native_window_buffers_and_lifecycle();
     test_synthetic_android_input_queue_and_looper();
+    test_headless_egl_gles_clear_subset();
     test_synthetic_jni_java_vm_tables_and_handles();
     test_a32_t32_execution_svc_and_trampolines();
     test_capabilities_and_optional_dbt_placeholder();

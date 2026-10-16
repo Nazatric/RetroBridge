@@ -15,6 +15,14 @@
 
 namespace retrobridge::runtime {
 
+struct HeadlessNativeWindowSnapshot32 final {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint32_t format = 0;
+    GuestAddress32 pixels{0};
+    bool locked = false;
+};
+
 /** Bounded headless ANativeWindow buffer bridge; it does not create Android Surface objects. */
 class GuestAndroidWindowThunks final {
 public:
@@ -38,6 +46,10 @@ public:
     [[nodiscard]] std::optional<std::uint32_t> resolve_symbol(std::string_view name) const noexcept;
     [[nodiscard]] std::optional<GuestAddress32> pixel_buffer(std::uint32_t window) const noexcept;
     [[nodiscard]] std::optional<std::uint64_t> posted_frame_count(std::uint32_t window) const noexcept;
+    [[nodiscard]] std::optional<HeadlessNativeWindowSnapshot32> snapshot_window(std::uint32_t window) const noexcept;
+    [[nodiscard]] bool retain_headless_window(std::uint32_t window) noexcept;
+    void release_headless_window(std::uint32_t window) noexcept;
+    [[nodiscard]] bool post_headless_frame(std::uint32_t window) noexcept;
 
 private:
     struct Window final {
@@ -92,6 +104,7 @@ private:
     static constexpr std::size_t kMaxHandleCells = 256;
     static constexpr std::uint64_t kMaxSurfacePixels = 4U * 1024U * 1024U;
     static constexpr std::size_t kMaxSurfaceBytesTotal = 16U * 1024U * 1024U;
+    static constexpr std::uint32_t kMaxSurfaceDimension = 4096;
     static constexpr std::uint32_t kSurfaceVirtualStart = 0x68000000U;
     static constexpr std::uint32_t kSurfaceVirtualEnd = 0x6c000000U;
     static constexpr std::size_t kSurfacePageBytes = 4096;

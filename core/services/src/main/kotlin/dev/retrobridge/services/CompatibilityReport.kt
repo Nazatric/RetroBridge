@@ -49,7 +49,7 @@ object CompatibilityReport {
         Capability(
             name = "Headless ANativeWindow buffer subset",
             status = CapabilityStatus.PARTIAL,
-            explanation = "Host-created headless surfaces provide separately mapped RGBA_8888 guest buffers (4 Mi pixels per surface, 16 MiB total), lock/unlock-and-post, geometry, and acquire/release thunks. Java Surface/ANativeWindow_fromSurface, synchronization fences, transforms, and device display integration are absent.",
+            explanation = "Host-created headless surfaces provide separately mapped RGBA_8888 guest buffers (4 Mi pixels per surface, 4096 pixels per side, 16 MiB total), lock/unlock-and-post, geometry, and acquire/release thunks. Java Surface/ANativeWindow_fromSurface, synchronization fences, transforms, and device display integration are absent.",
         ),
         Capability(
             name = "Synthetic AInputQueue and ALooper subset",
@@ -57,9 +57,9 @@ object CompatibilityReport {
             explanation = "A host-injected bounded key/motion queue exposes event accessors and a nonblocking per-runtime ALooper prepare/wake/timeout subset. There is no Android system input source, thread-local looper, input-to-looper attachment, callback dispatch, or file-descriptor polling.",
         ),
         Capability(
-            name = "Headless GLES/EGL",
-            status = CapabilityStatus.NOT_IMPLEMENTED,
-            explanation = "There is no guest GLES/EGL context, command translation, or headless graphics implementation.",
+            name = "Headless EGL/GLES clear subset",
+            status = CapabilityStatus.PARTIAL,
+            explanation = "A synthetic EGL display/config/window-surface/context path renders bounded RGBA_8888 color clears and scissor rectangles into guest memory, with swap and basic error/string queries. It has one non-thread-local current context; there are no shaders, draw calls, textures, buffers, framebuffers, pbuffer surfaces, or Android display integration.",
         ),
         Capability(
             name = "OpenSL ES audio",
