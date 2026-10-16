@@ -16,6 +16,7 @@ struct GuestCpuState32 final {
     std::uint32_t fpscr = 0;
     std::array<std::array<std::byte, 16>, 16> q{};
     std::uint32_t thread_local_storage = 0;
+    std::uint8_t thumb_it_state = 0;
 };
 
 enum class ExecutionStatus {
@@ -32,8 +33,9 @@ struct ExecutionResult final {
 };
 
 /**
- * ABI boundary for a future A32/T32 -> A64 translator. Implementations receive guest addresses,
- * not host pointers. Guest memory access and host-call thunks must remain explicitly marshalled.
+ * Guest-code execution boundary. Implementations receive guest addresses, not host pointers.
+ * Guest memory access and host-call thunks must remain explicitly marshalled. Despite the
+ * historical class name, implementations may interpret or translate instructions.
  */
 class TranslationEngine {
 public:
@@ -48,7 +50,7 @@ public:
     virtual void invalidate(GuestRange32 guest_code) noexcept = 0;
 };
 
-/** Safe placeholder: refuses execution until a reviewed translator backend is integrated. */
+/** Safe placeholder for configurations where no execution backend is integrated. */
 class UnavailableTranslationEngine final : public TranslationEngine {
 public:
     [[nodiscard]] const char* backend_name() const noexcept override;

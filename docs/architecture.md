@@ -9,22 +9,22 @@ RetroBridge is split so a later guest runtime can be developed without conflatin
 - `:core:manager` owns immutable guest metadata, an atomic JSON registry, and lifecycle transition validation.
 - `:core:fs` owns the per-import filesystem layout, narrow guest-path mapper, quota-bounded streaming Android/data and OBB ZIP import, and SAF-export ZIP writer. It is not a mount namespace and does not grant access to arbitrary external storage.
 - `:core:services` emits a capability report. It does not spoof PackageManager data or claim to provide Android framework services.
-- `core/runtime/src/main/cpp` contains native ABI boundary types, a strict ELF32/ARM metadata reader, an opaque handle table, and a translation-engine interface. The only supplied engine refuses execution.
-- `native/` builds host-side verification tools and parses real ARM32 test ELF files cross-compiled by CI.
+- `core/runtime/src/main/cpp` contains a sparse permission-checked guest memory map, an ELF32/ARM mapper and relocation subset, dynamic-symbol lookup, a bounded A32/T32 interpreter, guest SVC/trampoline hooks, lifecycle-function invocation, and an opaque handle table. These primitives are not yet connected to APK launch.
+- `native/` builds host-side verification tools and tests synthetic runtime code plus real ARM32 executable/shared-library fixtures cross-compiled by CI. The executable fixture is loaded, relocated, and run by the interpreter on the host.
 
 ## Important interfaces
 
 ### Guest address space
 
-`GuestAddress32` and `GuestRange32` store guest addresses as `uint32_t` and check arithmetic in a wider integer type. They never reinterpret a 32-bit guest address as a host pointer. A real guest arena, page mapping strategy, memory protection implementation, signal handler, and guest/host marshaling layer are not implemented.
+`GuestAddress32` and `GuestRange32` store guest addresses as `uint32_t` and check arithmetic in a wider integer type. `GuestMemory` maps sparse host-backed regions, enforces per-region read/write/execute permissions, and rejects unmapped or overflowing accesses; guest addresses are never cast to host pointers. This is not an OS page arena, signal-based fault boundary, process sandbox, or guest/host ABI marshaling layer.
 
-### Translation engine
+### ARM execution
 
-`TranslationEngine` is the future A32/T32-to-A64 execution boundary. `GuestCpuState32` carries R0-R15, CPSR, FPSCR, Q0-Q15, and guest TLS. `UnavailableTranslationEngine` reports `BackendUnavailable` for every run request. Dynarmic is not vendored, configured, or claimed to have been validated.
+`TranslationEngine` is the execution-backend interface. `Arm32Interpreter` implements a deliberately explicit subset of A32 and T32 (including common integer/data-processing, branches, loads/stores, Thumb-2 MOVW/MOVT, and SVC). `GuestCpuState32` carries R0-R15, CPSR/IT state, FPSCR, Q0-Q15, and guest TLS. Instruction budgets and guest-memory permissions are enforced. `GuestTrampolineRegistry` maps exported guest addresses/names to explicit host callbacks; it never exposes host function pointers to guest registers. `UnavailableTranslationEngine` remains a safe placeholder for a DBT backend that is not integrated. The interpreter is not a complete ARMv7/VFP/NEON implementation and is not wired to APK launch.
 
-### ELF inspection
+### ELF loading and lifecycle
 
-`Elf32Image::parse` accepts little-endian ELFCLASS32 `EM_ARM` ET_EXEC/ET_DYN files, validates program-header and file-backed segment bounds, and extracts `DT_NEEDED` names from a mapped `DT_STRTAB`. Diagnostics include the source filename and optional guest package. It does **not** mmap segments, implement `PT_TLS`, resolve symbols, apply ARM relocations, load dependencies, or invoke constructors. Host CTest checks generated ARM32 executable and shared-library fixtures.
+`Elf32Image::parse` validates little-endian ELFCLASS32 `EM_ARM` ET_EXEC/ET_DYN metadata. `Elf32Loader` maps PT_LOAD segments and permissions, parses dynamic symbols/hash tables, resolves symbols through a supplied callback, and applies a constrained ARM REL set. Unsupported RELA/RELR/Android packed relocations and full dependency loading are rejected rather than guessed. PT_TLS, full dynamic linking, and Bionic are not implemented. `GuestLifecycleExecutor` retrieves validated DT_INIT/DT_INIT_ARRAY and DT_FINI_ARRAY/DT_FINI functions and calls them using a temporary return trampoline. Native tests cover A32/T32 constructors/destructors, and CI cross-compiles, loads, relocates, and executes a small ARM32 ET_DYN program on the host.
 
 ### Guest references
 
@@ -36,11 +36,11 @@ Each import gets `RetroBridge/apps/<package>/<uuid>/` so separate imports cannot
 
 ## Roadmap (gates, not promises)
 
-1. Keep import, registry, path isolation, and ABI diagnostics tested.
-2. Select a licensed ARM32 translation backend, document its provenance and limitations, then add instruction-level tests before enabling any guest instruction execution.
-3. Implement an owned guest memory arena, ELF mapping/relocation/dependency loading, and safe guest fault reporting; fuzz the parser/loader before loading untrusted APK content.
-4. Add an explicit syscall/VFS boundary and ABI layout tests; never pass host pointers or host `long`/`size_t` layouts through guest registers.
-5. Implement JNI handles/strings/arrays/exception behavior and thread attach/detach with dedicated tests.
-6. Add framework proxying incrementally, with capability checks and per-API unsupported reports. Only then consider enabling a constrained launch path.
+1. Keep import, registry, path isolation, capability reporting, and ABI diagnostics tested.
+2. Expand the interpreter subset or integrate a reviewed, licensed ARM32 DBT; add instruction/ABI tests and harden unsupported-instruction behavior.
+3. Implement dependency loading, TLS, and linker semantics on top of the current guest memory/ELF primitives; fuzz all untrusted ELF paths and relocate/test failures.
+4. Add an explicit syscall/VFS boundary and guest ABI layout tests; never pass host pointers or host `long`/`size_t` layouts through guest registers.
+5. Implement system/JNI thunks, handles/strings/arrays/exceptions, and thread attach/detach with dedicated tests.
+6. Add lifecycle IPC and framework proxying incrementally, with capability checks and per-API unsupported reports. Only after a separate security review consider enabling a constrained launch path.
 
 A completed earlier gate does not imply that a later gate or general Android framework compatibility is available.

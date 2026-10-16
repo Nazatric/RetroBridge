@@ -16,6 +16,10 @@ add_executable(retrobridge_elf_inspect tools/elf32_inspect.cpp)
 target_link_libraries(retrobridge_elf_inspect PRIVATE retrobridge_runtime)
 target_compile_options(retrobridge_elf_inspect PRIVATE -Wall -Wextra -Wpedantic)
 
+add_executable(retrobridge_arm32_fixture_runner tools/arm32_fixture_runner.cpp)
+target_link_libraries(retrobridge_arm32_fixture_runner PRIVATE retrobridge_runtime)
+target_compile_options(retrobridge_arm32_fixture_runner PRIVATE -Wall -Wextra -Wpedantic)
+
 add_test(NAME native_core COMMAND retrobridge_native_tests)
 
 if(RETROBRIDGE_ARM32_EXECUTABLE)
@@ -25,6 +29,10 @@ if(RETROBRIDGE_ARM32_EXECUTABLE)
     add_test(
         NAME arm32_guest_executable_inspection
         COMMAND retrobridge_elf_inspect "${RETROBRIDGE_ARM32_EXECUTABLE}" "org.retrobridge.ci.guest"
+    )
+    add_test(
+        NAME arm32_guest_executable_execution
+        COMMAND retrobridge_arm32_fixture_runner "${RETROBRIDGE_ARM32_EXECUTABLE}"
     )
 endif()
 

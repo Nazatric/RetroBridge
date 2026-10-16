@@ -1,7 +1,9 @@
+#include "retrobridge/arm32_interpreter.h"
 #include "retrobridge/elf32_image.h"
 #include "retrobridge/elf32_loader.h"
 #include "retrobridge/guest_address.h"
 #include "retrobridge/guest_memory.h"
+#include "retrobridge/guest_lifecycle.h"
 #include "retrobridge/handle_table.h"
 #include "retrobridge/runtime_capabilities.h"
 #include "retrobridge/translation_engine.h"
@@ -149,7 +151,7 @@ std::vector<std::byte> make_loadable_arm_elf(bool include_sysv_hash = true) {
         {12, 0x300},                          // DT_INIT
         {25, 0x1020},                         // DT_INIT_ARRAY
         {27, 4},                              // DT_INIT_ARRAYSZ
-        {13, 0x304},                          // DT_FINI
+        {13, 0x340},                          // DT_FINI
         {26, 0x1024},                         // DT_FINI_ARRAY
         {28, 4},                              // DT_FINI_ARRAYSZ
         {0, 0},                               // DT_NULL
@@ -198,8 +200,16 @@ std::vector<std::byte> make_loadable_arm_elf(bool include_sysv_hash = true) {
     put_u32(bytes, 0x290, 0x1024);
     put_u32(bytes, 0x294, 23U);              // R_ARM_RELATIVE for fini_array entry
     put_u32(bytes, 0x1010, 4);
-    put_u32(bytes, 0x1020, 0x301);
-    put_u32(bytes, 0x1024, 0x305);
+    put_u32(bytes, 0x1020, 0x321);
+    put_u32(bytes, 0x1024, 0x345);
+
+    put_u32(bytes, 0x300, 0xe3a00001U); // A32 constructor: mov r0, #1
+    put_u32(bytes, 0x304, 0xe12fff1eU); // bx lr
+    put_u16(bytes, 0x320, 0x2102U);    // T32 constructor: movs r1, #2
+    put_u16(bytes, 0x322, 0x4770U);    // bx lr
+    put_u32(bytes, 0x340, 0xe12fff1eU); // A32 destructor: bx lr
+    put_u16(bytes, 0x344, 0x2203U);    // T32 destructor: movs r2, #3
+    put_u16(bytes, 0x346, 0x4770U);    // bx lr
     return bytes;
 }
 
@@ -278,7 +288,7 @@ void test_elf32_loader_maps_symbols_relocations_and_constructors() {
     check(!relocation_error.has_value(), "supported ABS32 and RELATIVE relocations apply");
     check(memory.read_u32(GuestAddress32{0x40001010U}).value_or(0U) == 0x50000004U,
         "R_ARM_ABS32 uses external guest symbol and implicit addend");
-    check(memory.read_u32(GuestAddress32{0x40001020U}).value_or(0U) == 0x40000301U,
+    check(memory.read_u32(GuestAddress32{0x40001020U}).value_or(0U) == 0x40000321U,
         "R_ARM_RELATIVE adds the module load bias");
 
     const auto constructors_result = loaded->constructor_addresses(memory);
@@ -286,7 +296,7 @@ void test_elf32_loader_maps_symbols_relocations_and_constructors() {
     check(constructors != nullptr && constructors->size() == 2,
         "DT_INIT and relocated DT_INIT_ARRAY functions are exposed");
     if (constructors != nullptr && constructors->size() == 2) {
-        check((*constructors)[0].value() == 0x40000300U && (*constructors)[1].value() == 0x40000301U,
+        check((*constructors)[0].value() == 0x40000300U && (*constructors)[1].value() == 0x40000321U,
             "constructors retain order and Thumb entry state");
     }
     const auto destructors_result = loaded->destructor_addresses(memory);
@@ -294,9 +304,34 @@ void test_elf32_loader_maps_symbols_relocations_and_constructors() {
     check(destructors != nullptr && destructors->size() == 2,
         "DT_FINI and relocated DT_FINI_ARRAY functions are exposed");
     if (destructors != nullptr && destructors->size() == 2) {
-        check((*destructors)[0].value() == 0x40000305U && (*destructors)[1].value() == 0x40000304U,
+        check((*destructors)[0].value() == 0x40000345U && (*destructors)[1].value() == 0x40000340U,
             "destructors run in reverse array order before DT_FINI");
     }
+
+    GuestTrampolineRegistry lifecycle_trampolines;
+    Arm32Interpreter interpreter(memory, lifecycle_trampolines, {});
+    GuestLifecycleExecutor lifecycle(memory, interpreter, lifecycle_trampolines);
+    constexpr std::uint32_t stack_base = 0x70000000U;
+    check(memory.map_zeroed(GuestAddress32{stack_base}, 0x1000,
+        GuestPermission::Read | GuestPermission::Write), "constructor test stack maps RW");
+    GuestCpuState32 lifecycle_state{};
+    lifecycle_state.r[13] = stack_base + 0xff0U;
+    const auto constructor_execution = lifecycle.run_constructors(*loaded, lifecycle_state, 64);
+    check(constructor_execution.status == ExecutionStatus::Completed
+            && lifecycle_state.r[0] == 1 && lifecycle_state.r[1] == 2,
+        "DT_INIT and DT_INIT_ARRAY A32/T32 functions execute and return in order");
+    check(constructor_execution.guest_instructions == 6,
+        "constructor execution counts each guest instruction and return thunk");
+    check(lifecycle_trampolines.register_trampoline("lifecycle_cleanup_probe", GuestAddress32{0xfffffff1U},
+        [](GuestCpuState32&, GuestMemory&) { return GuestHookResult{}; }),
+        "temporary constructor return thunk is removed after execution");
+    check(lifecycle_trampolines.unregister_trampoline(GuestAddress32{0xfffffff1U}),
+        "lifecycle thunk cleanup releases its guest address");
+    const auto destructor_execution = lifecycle.run_destructors(*loaded, lifecycle_state, 64);
+    check(destructor_execution.status == ExecutionStatus::Completed && lifecycle_state.r[2] == 3,
+        "DT_FINI_ARRAY and DT_FINI A32/T32 functions execute before unload");
+    check(destructor_execution.guest_instructions == 5,
+        "destructor execution honors reverse array and direct-finalizer order");
 
     auto gnu_only_bytes = make_loadable_arm_elf(false);
     GuestMemory gnu_only_memory(0x10000);
@@ -356,14 +391,99 @@ void test_opaque_handles_and_generation() {
     }
 }
 
-void test_execution_is_explicitly_disabled() {
+void test_a32_t32_execution_svc_and_trampolines() {
+    using namespace retrobridge::runtime;
+    GuestMemory memory(0x10000);
+    GuestTrampolineRegistry trampolines;
+    auto svc = [](GuestCpuState32& state, std::uint32_t immediate, GuestMemory&) {
+        if (immediate == 0 && state.r[7] == 1) return GuestHookResult{GuestHookAction::Stop, "fixture exit"};
+        return GuestHookResult{GuestHookAction::Fault, "unexpected fixture SVC"};
+    };
+    Arm32Interpreter interpreter(memory, trampolines, svc);
+    check(interpreter.available(), "A32/T32 interpreter reports an executable backend");
+
+    std::vector<std::byte> arm_program(16, std::byte{0});
+    put_u32(arm_program, 0, 0xe3a00005U);  // mov r0, #5
+    put_u32(arm_program, 4, 0xe2800003U);  // add r0, r0, #3
+    put_u32(arm_program, 8, 0xe3a07001U);  // mov r7, #1
+    put_u32(arm_program, 12, 0xef000000U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x1000}, arm_program, arm_program.size(),
+        GuestPermission::Read | GuestPermission::Execute), "A32 test code maps RX");
+    GuestCpuState32 arm_state{};
+    const auto arm_result = interpreter.run(arm_state, GuestAddress32{0x1000}, 32);
+    check(arm_result.status == ExecutionStatus::Completed && arm_state.r[0] == 8,
+        "A32 data-processing instructions execute until SVC exit");
+
+    std::vector<std::byte> thumb_program(8, std::byte{0});
+    put_u16(thumb_program, 0, 0x2007U); // movs r0, #7
+    put_u16(thumb_program, 2, 0x3001U); // adds r0, #1
+    put_u16(thumb_program, 4, 0x2701U); // movs r7, #1
+    put_u16(thumb_program, 6, 0xdf00U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x2000}, thumb_program, thumb_program.size(),
+        GuestPermission::Read | GuestPermission::Execute), "T32 test code maps RX");
+    GuestCpuState32 thumb_state{};
+    const auto thumb_result = interpreter.run(thumb_state, GuestAddress32{0x2001}, 32);
+    check(thumb_result.status == ExecutionStatus::Completed && thumb_state.r[0] == 8,
+        "T32 16-bit instructions execute and SVC is dispatched");
+
+    std::vector<std::byte> wide_thumb_program(12, std::byte{0});
+    put_u16(wide_thumb_program, 0, 0xf240U); // movw r0, #40
+    put_u16(wide_thumb_program, 2, 0x0028U);
+    put_u16(wide_thumb_program, 4, 0xf2c0U); // movt r0, #1
+    put_u16(wide_thumb_program, 6, 0x0001U);
+    put_u16(wide_thumb_program, 8, 0x2701U); // movs r7, #1
+    put_u16(wide_thumb_program, 10, 0xdf00U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x2100}, wide_thumb_program, wide_thumb_program.size(),
+        GuestPermission::Read | GuestPermission::Execute), "wide T32 test code maps RX");
+    GuestCpuState32 wide_thumb_state{};
+    const auto wide_thumb_result = interpreter.run(wide_thumb_state, GuestAddress32{0x2101}, 32);
+    check(wide_thumb_result.status == ExecutionStatus::Completed && wide_thumb_state.r[0] == 0x00010028U,
+        "T32 32-bit MOVW/MOVT instructions decode and execute");
+
+    std::vector<std::byte> caller_program(16, std::byte{0});
+    put_u32(caller_program, 0, 0xe3a00009U);  // mov r0, #9
+    put_u32(caller_program, 4, 0xeb000001U);  // bl 0x3010
+    put_u32(caller_program, 8, 0xe3a07001U);  // mov r7, #1
+    put_u32(caller_program, 12, 0xef000000U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x3000}, caller_program, caller_program.size(),
+        GuestPermission::Read | GuestPermission::Execute), "trampoline caller code maps RX");
+    check(trampolines.register_trampoline("fixture_thunk", GuestAddress32{0x3010},
+        [](GuestCpuState32& state, GuestMemory&) {
+            state.r[0] += 4;
+            return GuestHookResult{};
+        }), "guest thunk registers by guest symbol name and address");
+    check(trampolines.resolve_symbol("fixture_thunk").value_or(0U) == 0x3010U,
+        "guest linker can resolve a registered trampoline symbol");
+    GuestCpuState32 caller_state{};
+    const auto trampoline_result = interpreter.run(caller_state, GuestAddress32{0x3000}, 32);
+    check(trampoline_result.status == ExecutionStatus::Completed && caller_state.r[0] == 13,
+        "A32 BL calls a host thunk and returns through guest LR");
+    check(trampoline_result.guest_instructions == 5,
+        "trampoline dispatch consumes one bounded guest instruction step");
+
+    std::vector<std::byte> loop_program(4, std::byte{0});
+    put_u32(loop_program, 0, 0xeafffffeU); // b .
+    check(memory.map_bytes(GuestAddress32{0x4000}, loop_program, loop_program.size(),
+        GuestPermission::Read | GuestPermission::Execute), "bounded-loop test code maps RX");
+    GuestCpuState32 loop_state{};
+    const auto loop_result = interpreter.run(loop_state, GuestAddress32{0x4000}, 3);
+    check(loop_result.status == ExecutionStatus::BudgetExhausted && loop_result.guest_instructions == 3,
+        "A32 backward branches cannot exceed the instruction budget");
+}
+
+void test_capabilities_and_optional_dbt_placeholder() {
     retrobridge::runtime::UnavailableTranslationEngine engine;
     retrobridge::runtime::GuestCpuState32 state{};
     const auto result = engine.run(state, retrobridge::runtime::GuestAddress32{0x1000}, 100);
     check(!engine.available(), "placeholder translator reports unavailable");
     check(result.status == retrobridge::runtime::ExecutionStatus::BackendUnavailable, "placeholder refuses guest execution");
     check(retrobridge::runtime::current_capabilities().arm32_elf_metadata_validation, "ELF metadata validation is reported available");
-    check(!retrobridge::runtime::current_capabilities().arbitrary_guest_execution, "arbitrary guest execution is reported unavailable");
+    check(retrobridge::runtime::current_capabilities().guest_elf_mapping_and_supported_relocations,
+        "guest ELF mapping and relocation support is reported available");
+    check(retrobridge::runtime::current_capabilities().arm32_instruction_execution,
+        "bounded ARM instruction interpretation is reported available");
+    check(!retrobridge::runtime::current_capabilities().arbitrary_guest_execution,
+        "arbitrary guest execution remains unavailable pending a full compatibility/security layer");
 }
 
 }  // namespace
@@ -374,7 +494,8 @@ int main() {
     test_elf32_loader_maps_symbols_relocations_and_constructors();
     test_elf_validation_and_dependencies();
     test_opaque_handles_and_generation();
-    test_execution_is_explicitly_disabled();
+    test_a32_t32_execution_svc_and_trampolines();
+    test_capabilities_and_optional_dbt_placeholder();
     if (failures != 0) {
         std::cerr << failures << " native verification check(s) failed\n";
         return 1;

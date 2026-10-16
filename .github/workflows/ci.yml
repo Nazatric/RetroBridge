@@ -85,7 +85,7 @@ jobs:
           NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           CC="$NDK_BIN/armv7a-linux-androideabi23-clang"
           mkdir -p native/build/arm32-fixtures diagnostics
-          "$CC" -fPIE -pie -nostdlib \
+          "$CC" -marm -fPIE -pie -nostdlib \
             -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables \
             -Wl,-e,_start -Wl,--build-id=none \
             native/fixtures/arm32_guest_entry.c \
@@ -156,6 +156,7 @@ jobs:
             native/build/arm32-fixtures/*
             native/build/host/retrobridge_native_tests
             native/build/host/retrobridge_elf_inspect
+            native/build/host/retrobridge_arm32_fixture_runner
             native/build/host/Testing/Temporary/LastTest.log
             diagnostics/*.log
             **/build/test-results/**/*.xml

@@ -14,11 +14,11 @@
 
 ## Not a security boundary for guest execution
 
-A process split alone is not a complete sandbox. If native guest execution is added, the design must account for host process credentials, file descriptors, signals, memory mapping, executable memory, thread creation, Binder access, Android permission checks, host pointers, callbacks, and denial-of-service risks. Guest code must not be enabled based solely on ELF validation or a DBT backend.
+A process split alone is not a complete sandbox. The repository now contains a bounded ARM instruction interpreter and host-side fixture execution, but imported APK code is not launched and the reserved Android guest service still rejects start requests. Before enabling execution of imported code, the design must account for host process credentials, file descriptors, signals, memory mapping, executable memory, thread creation, Binder access, Android permission checks, host pointers, callbacks, and denial-of-service risks. Guest code must not be enabled based solely on ELF validation or the current interpreter.
 
 The current path mapper is a library utility used by the prototype. It does not intercept Linux syscalls, establish a mount namespace, protect against every possible filesystem race, or mediate arbitrary host APIs. Do not use the prototype to run APKs from untrusted sources as executable guests.
 
-## Planned hardening before execution
+## Planned hardening before imported APK execution
 
 - Fuzz ELF parsing and any ZIP/data archive extraction.
 - Define an explicit guest memory allocator and bounds-check all guest reads/writes.
