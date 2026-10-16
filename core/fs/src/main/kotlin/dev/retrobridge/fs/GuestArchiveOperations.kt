@@ -182,7 +182,7 @@ internal class GuestArchiveOperations(private val storage: GuestStorage) {
             Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
                 override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
                     if (attrs.isSymbolicLink) throw SecurityException("Cannot export a symbolic link: $file")
-                    if (attrs.isRegularFile) files += file
+                    if (attrs.isRegularFile) files.add(file)
                     return FileVisitResult.CONTINUE
                 }
             })
