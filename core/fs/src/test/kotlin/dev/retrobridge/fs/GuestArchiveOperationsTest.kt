@@ -91,6 +91,7 @@ class GuestArchiveOperationsTest {
         val storage = newStorage("org.example.export")
         storage.initialize()
         Files.writeString(storage.layout.internalFiles.resolve("save.dat"), "state")
+        Files.createDirectories(storage.layout.externalData.resolve("files"))
         Files.writeString(storage.layout.externalData.resolve("files/user.txt"), "user")
         Files.writeString(storage.layout.obb.resolve("main.1.org.example.export.obb"), "obb")
         val archive = ByteArrayOutputStream()
