@@ -132,8 +132,8 @@ jobs:
               echo '```text' >> "$GITHUB_STEP_SUMMARY"
               tail -n 100 "$log" >> "$GITHUB_STEP_SUMMARY"
               echo '```' >> "$GITHUB_STEP_SUMMARY"
-              message="$(tail -n 100 "$log" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e 's/\n/%0A/g' -e 's/::/%3A%3A/g')"
-              echo "::error title=RetroBridge diagnostic ($log)::$message"
+              message="$(tail -n 100 "$log" | base64 -w0)"
+              echo "::error title=RetroBridge diagnostic base64 ($log)::$message"
             fi
           done
 
