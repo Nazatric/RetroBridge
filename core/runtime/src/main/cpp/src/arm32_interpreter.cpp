@@ -325,7 +325,7 @@ void branch_exchange(GuestCpuState32& state, std::uint32_t target) noexcept {
         return {};
     }
 
-    if ((instruction & 0x0e000000U) == 0x00000000U) {
+    if ((instruction & 0x0c000000U) == 0x00000000U) {
         const bool immediate = (instruction & (1U << 25U)) != 0;
         const auto opcode = (instruction >> 21U) & 0xfU;
         const bool set_flags = (instruction & (1U << 20U)) != 0;
