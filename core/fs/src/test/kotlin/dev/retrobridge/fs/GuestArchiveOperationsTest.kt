@@ -113,7 +113,7 @@ class GuestArchiveOperationsTest {
         assertTrue("internal/files/save.dat" in names)
         assertTrue("external/data/files/user.txt" in names)
         assertTrue("obb/main.1.org.example.export.obb" in names)
-        assertTrue(result.obbFiles.single().endsWith("/obb/main.1.org.example.export.obb"))
+        assertEquals("obb/main.1.org.example.export.obb", result.obbFiles.single())
         assertTrue(String(contents.getValue("manifest.json")).contains("\"packageName\":\"org.example.export\""))
         assertEquals("state", String(contents.getValue("internal/files/save.dat")))
     }
