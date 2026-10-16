@@ -7,6 +7,9 @@ struct RuntimeCapabilities final {
     bool arm32_instruction_translation = false;
     bool arm32_instruction_execution = true;
     bool guest_elf_mapping_and_supported_relocations = true;
+    bool guest_heap_allocator = true;
+    bool native_guest_vfs = true;
+    bool arm32_eabi_syscall_subset = true;
     bool bionic_and_guest_syscalls = false;
     bool synthetic_jni = false;
     bool android_framework_virtualization = false;

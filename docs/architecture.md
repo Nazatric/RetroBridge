@@ -16,11 +16,15 @@ RetroBridge is split so a later guest runtime can be developed without conflatin
 
 ### Guest address space
 
-`GuestAddress32` and `GuestRange32` store guest addresses as `uint32_t` and check arithmetic in a wider integer type. `GuestMemory` maps sparse host-backed regions, enforces per-region read/write/execute permissions, and rejects unmapped or overflowing accesses; guest addresses are never cast to host pointers. This is not an OS page arena, signal-based fault boundary, process sandbox, or guest/host ABI marshaling layer.
+`GuestAddress32` and `GuestRange32` store guest addresses as `uint32_t` and check arithmetic in a wider integer type. `GuestMemory` maps sparse host-backed regions, enforces per-region read/write/execute permissions, and rejects unmapped or overflowing accesses; guest addresses are never cast to host pointers. `GuestHeap32` provides a bounded, aligned free-list allocator with coalescing and calloc/realloc/POSIX alignment semantics. These are not an OS page arena, signal-based fault boundary, process sandbox, or thread-safe Bionic heap.
 
 ### ARM execution
 
 `TranslationEngine` is the execution-backend interface. `Arm32Interpreter` implements a deliberately explicit subset of A32 and T32 (including common integer/data-processing, branches, loads/stores, Thumb-2 MOVW/MOVT, and SVC). `GuestCpuState32` carries R0-R15, CPSR/IT state, FPSCR, Q0-Q15, and guest TLS. Instruction budgets and guest-memory permissions are enforced. `GuestTrampolineRegistry` maps exported guest addresses/names to explicit host callbacks; it never exposes host function pointers to guest registers. `UnavailableTranslationEngine` remains a safe placeholder for a DBT backend that is not integrated. The interpreter is not a complete ARMv7/VFP/NEON implementation and is not wired to APK launch.
+
+### Guest filesystem and syscalls
+
+`NativeVfsPathTranslator` maps a strict set of Android private/internal, app-specific external, and OBB prefixes into an app-owned host root; it rejects traversal, package-prefix confusion, and symlink components. `NativeVfs` exposes virtual descriptors and uses directory-relative host calls without returning host paths or descriptor values to guest code. `Arm32SyscallDispatcher` converts selected ARM Linux EABI calls and fixed-width stat/time layouts, validates guest buffers, handles a subset of file/directory, clock, `mmap2`/`mprotect`/`munmap`, `brk`, and process calls, and returns `ENOSYS` for unknown calls. This is not a complete Linux kernel, Bionic, thread scheduler, shared-writable mmap implementation, or APK-launch integration; the host filesystem boundary also needs race-focused hardening.
 
 ### ELF loading and lifecycle
 
@@ -39,7 +43,7 @@ Each import gets `RetroBridge/apps/<package>/<uuid>/` so separate imports cannot
 1. Keep import, registry, path isolation, capability reporting, and ABI diagnostics tested.
 2. Expand the interpreter subset or integrate a reviewed, licensed ARM32 DBT; add instruction/ABI tests and harden unsupported-instruction behavior.
 3. Implement dependency loading, TLS, and linker semantics on top of the current guest memory/ELF primitives; fuzz all untrusted ELF paths and relocate/test failures.
-4. Add an explicit syscall/VFS boundary and guest ABI layout tests; never pass host pointers or host `long`/`size_t` layouts through guest registers.
+4. Expand syscall/VFS coverage, harden host path race handling, and add guest ABI layout tests; never pass host pointers or host `long`/`size_t` layouts through guest registers.
 5. Implement system/JNI thunks, handles/strings/arrays/exceptions, and thread attach/detach with dedicated tests.
 6. Add lifecycle IPC and framework proxying incrementally, with capability checks and per-API unsupported reports. Only after a separate security review consider enabling a constrained launch path.
 

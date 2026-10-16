@@ -71,6 +71,10 @@ public:
     [[nodiscard]] bool write_u32(GuestAddress32 address, std::uint32_t value) noexcept;
 
     [[nodiscard]] bool is_mapped(GuestAddress32 address, std::uint64_t length = 1) const noexcept;
+    [[nodiscard]] bool is_accessible(
+        GuestAddress32 address,
+        std::uint64_t length,
+        GuestPermission required) const noexcept;
     [[nodiscard]] bool is_executable(GuestAddress32 address) const noexcept;
     [[nodiscard]] std::size_t mapped_bytes() const noexcept { return mapped_bytes_; }
     [[nodiscard]] std::size_t byte_limit() const noexcept { return byte_limit_; }

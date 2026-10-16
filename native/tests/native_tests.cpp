@@ -4,17 +4,29 @@
 #include "retrobridge/guest_address.h"
 #include "retrobridge/guest_memory.h"
 #include "retrobridge/guest_lifecycle.h"
+#include "retrobridge/guest_heap.h"
 #include "retrobridge/handle_table.h"
 #include "retrobridge/runtime_capabilities.h"
+#include "arm32_syscall_dispatcher.h"
+#include "native_vfs.h"
+#include "native_vfs_path.h"
 #include "retrobridge/translation_engine.h"
 
+#include <algorithm>
 #include <array>
+#include <bit>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fcntl.h>
 #include <iostream>
+#include <limits>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <unistd.h>
 #include <variant>
 #include <vector>
 
@@ -249,6 +261,10 @@ void test_guest_memory_permissions_and_bounds() {
     check(memory.loader_write(GuestAddress32{0x1000}, initial), "loader can patch protected memory");
     check(memory.is_executable(GuestAddress32{0x1004}), "execute permission is tracked independently");
     check(!memory.is_executable(GuestAddress32{0x1000}), "non-executable region remains non-executable");
+    check(memory.is_accessible(GuestAddress32{0x1000}, 4, GuestPermission::Read),
+        "permission-aware guest buffer checks accept readable ranges");
+    check(!memory.is_accessible(GuestAddress32{0x1000}, 4, GuestPermission::Write),
+        "permission-aware guest buffer checks reject read-only ranges");
     check(!memory.map_zeroed(GuestAddress32{0x2000}, 32, GuestPermission::Read), "memory quota is enforced");
 }
 
@@ -391,6 +407,310 @@ void test_opaque_handles_and_generation() {
     }
 }
 
+void test_native_vfs_path_translation() {
+    using retrobridge::runtime::NativeVfsPathTranslator;
+    const auto root = std::filesystem::temp_directory_path() / "retrobridge-vfs-path-test";
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+    std::filesystem::create_directories(root / "internal/files");
+    std::filesystem::create_directories(root / "external/data/files");
+    std::filesystem::create_directories(root / "obb");
+    NativeVfsPathTranslator translator(root, "org.example.app");
+    check(translator.valid(), "native VFS translator accepts normalized app root and package");
+    const auto internal = translator.translate("/data/data/org.example.app/files/save.bin");
+    const auto alias = translator.translate("/data/user/0/org.example.app/databases/state.db");
+    const auto external = translator.translate("/storage/emulated/0/Android/data/org.example.app/files/user.bin");
+    const auto obb = translator.translate("/sdcard/Android/obb/org.example.app/main.1.org.example.app.obb");
+    check(internal.has_value() && *internal == root / "internal/files/save.bin",
+        "private data paths map beneath guest internal storage");
+    check(alias.has_value() && *alias == root / "internal/databases/state.db",
+        "legacy /data/user/0 package alias maps to the same root");
+    check(external.has_value() && *external == root / "external/data/files/user.bin",
+        "Android/data paths map beneath guest external storage");
+    check(obb.has_value() && *obb == root / "obb/main.1.org.example.app.obb",
+        "OBB paths map beneath guest expansion storage");
+    check(!translator.translate("/data/data/org.example.app/../../outside").has_value(),
+        "native VFS rejects traversal before host path normalization");
+    check(!translator.translate("/data/data/org.example.app.attacker/files/x").has_value(),
+        "native VFS rejects package-prefix confusion");
+    check(!translator.translate("/etc/passwd").has_value(), "native VFS has no host-root fallback");
+    std::filesystem::create_directory_symlink(root / "external/data", root / "internal/link", error);
+    if (!error) {
+        check(!translator.translate("/data/data/org.example.app/link/files/user.bin").has_value(),
+            "native VFS rejects symlink components beneath the app root");
+    } else {
+        check(false, "native VFS symlink fixture is created");
+    }
+    std::filesystem::remove_all(root, error);
+}
+
+void test_native_vfs_io_and_descriptors() {
+    using retrobridge::runtime::NativeVfs;
+    const auto root = std::filesystem::temp_directory_path() / "retrobridge-vfs-io-test";
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+    std::filesystem::create_directories(root / "internal/files");
+    std::filesystem::create_directories(root / "external/data/files");
+    std::filesystem::create_directories(root / "obb");
+    NativeVfs vfs(root, "org.example.app");
+    check(vfs.available(), "native VFS opens the per-app root directory");
+
+    const auto path = "/data/data/org.example.app/files/state.bin";
+    const int fd = vfs.open(path, O_CREAT | O_TRUNC | O_RDWR, 0600);
+    check(fd >= 3, "native VFS returns a guest descriptor, not a host path");
+    if (fd >= 3) {
+        const std::array<std::byte, 5> contents{std::byte{'h'}, std::byte{'e'}, std::byte{'l'}, std::byte{'l'}, std::byte{'o'}};
+        check(vfs.write(fd, contents) == 5, "guest writes route into isolated internal storage");
+        check(vfs.seek(fd, 0, SEEK_SET) == 0, "guest lseek updates the virtual descriptor position");
+        std::array<std::byte, 8> readback{};
+        check(vfs.read(fd, readback) == 5 && readback[0] == std::byte{'h'} && readback[4] == std::byte{'o'},
+            "guest reads recover file contents through the VFS");
+        struct stat status{};
+        check(vfs.fstat(fd, &status) == 0 && status.st_size == 5, "guest fstat reports file metadata");
+        check(vfs.close(fd) == 0 && vfs.close(fd) == -1, "guest descriptors close once and stale fds are rejected");
+    }
+    check(vfs.access(path, F_OK) == 0, "VFS access checks a path within the guest root");
+    check(vfs.mkdirat(-100, "/storage/emulated/0/Android/data/org.example.app/files/cache", 0700) == 0,
+        "mkdirat redirects Android/data into isolated external storage");
+    const int directory_fd = vfs.open("/data/data/org.example.app/files", O_RDONLY | O_DIRECTORY);
+    check(directory_fd >= 3, "guest directory opens through a virtual descriptor");
+    if (directory_fd >= 3) {
+        std::array<std::byte, 1024> entries{};
+        const auto count = vfs.getdents64(directory_fd, entries);
+        check(count > 0, "getdents64 serializes guest dirent64 records");
+        const int relative_fd = vfs.openat(directory_fd, "relative.bin", O_CREAT | O_TRUNC | O_RDWR, 0600);
+        check(relative_fd >= 3, "openat resolves a relative path against a guest directory descriptor");
+        if (relative_fd >= 3) {
+            const std::array<std::byte, 3> relative_contents{std::byte{'a'}, std::byte{'t'}, std::byte{'!'}};
+            check(vfs.write(relative_fd, relative_contents) == 3, "relative openat descriptor writes inside its directory");
+            struct stat relative_status{};
+            check(vfs.statat(directory_fd, "relative.bin", &relative_status, 0) == 0
+                    && relative_status.st_size == 3,
+                "fstatat honors the guest directory descriptor");
+            check(vfs.faccessat(directory_fd, "relative.bin", R_OK, 0) == 0,
+                "faccessat honors the guest directory descriptor");
+            check(vfs.close(relative_fd) == 0, "relative openat descriptor closes");
+            check(vfs.unlinkat(directory_fd, "relative.bin", 0) == 0,
+                "unlinkat honors the guest directory descriptor");
+        }
+        check(vfs.close(directory_fd) == 0, "guest directory descriptor closes");
+    }
+    check(vfs.renameat(-100, path, -100, "/data/data/org.example.app/files/renamed.bin") == 0,
+        "renameat stays inside the translated guest root");
+    struct stat path_status{};
+    check(vfs.stat_path("/data/data/org.example.app/files/renamed.bin", &path_status) == 0
+            && path_status.st_size == 5,
+        "stat64 path lookup is restricted to app-private storage");
+    check(vfs.unlinkat(-100, "/data/data/org.example.app/files/renamed.bin", 0) == 0,
+        "unlinkat removes only a guest-owned file");
+    check(vfs.open("/etc/passwd", O_RDONLY) == -1, "VFS refuses host-root path fallback");
+    std::filesystem::remove_all(root, error);
+}
+
+void test_arm32_syscall_dispatcher_and_guest_vfs() {
+    using namespace retrobridge::runtime;
+    const auto root = std::filesystem::temp_directory_path() / "retrobridge-syscall-test";
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+    std::filesystem::create_directories(root / "internal/files");
+    std::filesystem::create_directories(root / "external/data/files");
+    std::filesystem::create_directories(root / "obb");
+
+    GuestMemory memory(2U * 1024U * 1024U);
+    GuestHeap32 heap(memory);
+    check(heap.initialize(GuestAddress32{0x10000000U}, 64U * 1024U), "syscall guest heap initializes");
+    NativeVfs vfs(root, "org.example.syscall");
+    Arm32SyscallDispatcher dispatcher(memory, heap, vfs);
+    check(memory.map_zeroed(GuestAddress32{0x50000000U}, 0x10000,
+        GuestPermission::Read | GuestPermission::Write), "syscall string and buffer memory maps RW");
+
+    const auto write_string = [&](std::uint32_t address, std::string_view value) {
+        std::vector<std::byte> bytes(value.size() + 1U, std::byte{0});
+        for (std::size_t index = 0; index < value.size(); ++index) {
+            bytes[index] = static_cast<std::byte>(static_cast<unsigned char>(value[index]));
+        }
+        return memory.write(GuestAddress32{address}, bytes);
+    };
+    constexpr std::uint32_t path_address = 0x50000000U;
+    constexpr std::uint32_t buffer_address = 0x50000100U;
+    constexpr std::uint32_t stat_address = 0x50000200U;
+    constexpr std::uint32_t cwd_address = 0x50000300U;
+    check(write_string(path_address, "/data/data/org.example.syscall/files/svc.txt"),
+        "guest path string is staged in guest memory");
+
+    GuestCpuState32 state{};
+    state.r[7] = 322; // openat
+    state.r[0] = std::bit_cast<std::uint32_t>(static_cast<std::int32_t>(-100));
+    state.r[1] = path_address;
+    state.r[2] = O_CREAT | O_TRUNC | O_RDWR;
+    state.r[3] = 0600;
+    const auto open_result = dispatcher.handle(state, 0, memory);
+    const auto guest_fd = std::bit_cast<std::int32_t>(state.r[0]);
+    check(open_result.action == GuestHookAction::Continue && guest_fd >= 3,
+        "ARM EABI openat dispatch returns a guest descriptor");
+
+    const std::array<std::byte, 7> payload{std::byte{'g'}, std::byte{'u'}, std::byte{'e'}, std::byte{'s'},
+        std::byte{'t'}, std::byte{'!'}, std::byte{'\n'}};
+    check(memory.write(GuestAddress32{buffer_address}, payload), "guest payload is writable");
+    state.r[7] = 4; // write
+    state.r[0] = static_cast<std::uint32_t>(guest_fd);
+    state.r[1] = buffer_address;
+    state.r[2] = payload.size();
+    (void)dispatcher.handle(state, 0, memory);
+    check(std::bit_cast<std::int32_t>(state.r[0]) == static_cast<std::int32_t>(payload.size()),
+        "ARM EABI write copies guest bytes through the VFS");
+
+    state.r[7] = 19; // lseek
+    state.r[0] = static_cast<std::uint32_t>(guest_fd);
+    state.r[1] = 0;
+    state.r[2] = SEEK_SET;
+    (void)dispatcher.handle(state, 0, memory);
+    check(std::bit_cast<std::int32_t>(state.r[0]) == 0, "ARM EABI lseek resets the guest file position");
+    std::array<std::byte, 16> cleared{};
+    check(memory.write(GuestAddress32{buffer_address}, cleared), "guest read destination is cleared");
+    state.r[7] = 3; // read
+    state.r[0] = static_cast<std::uint32_t>(guest_fd);
+    state.r[1] = buffer_address;
+    state.r[2] = payload.size();
+    (void)dispatcher.handle(state, 0, memory);
+    std::array<std::byte, 7> readback{};
+    check(std::bit_cast<std::int32_t>(state.r[0]) == static_cast<std::int32_t>(payload.size())
+            && memory.read(GuestAddress32{buffer_address}, readback) && readback == payload,
+        "ARM EABI read copies VFS contents back to guest memory");
+
+    state.r[7] = 197; // fstat64
+    state.r[0] = static_cast<std::uint32_t>(guest_fd);
+    state.r[1] = stat_address;
+    (void)dispatcher.handle(state, 0, memory);
+    check(std::bit_cast<std::int32_t>(state.r[0]) == 0
+            && memory.read_u32(GuestAddress32{stat_address + 44U}).value_or(0U) == payload.size(),
+        "ARM EABI fstat64 writes the 32-bit guest stat64 layout");
+    state.r[7] = 6; // close
+    state.r[0] = static_cast<std::uint32_t>(guest_fd);
+    (void)dispatcher.handle(state, 0, memory);
+    check(std::bit_cast<std::int32_t>(state.r[0]) == 0, "ARM EABI close releases the virtual descriptor");
+
+    state.r[7] = 183; // getcwd
+    state.r[0] = cwd_address;
+    state.r[1] = 256;
+    (void)dispatcher.handle(state, 0, memory);
+    const auto cwd = std::string("/data/data/org.example.syscall/files");
+    std::vector<std::byte> cwd_bytes(cwd.size());
+    check(std::bit_cast<std::int32_t>(state.r[0]) == static_cast<std::int32_t>(cwd.size() + 1U)
+            && memory.read(GuestAddress32{cwd_address}, cwd_bytes)
+            && std::equal(cwd.begin(), cwd.end(), cwd_bytes.begin(), [](char left, std::byte right) {
+                return static_cast<unsigned char>(left) == std::to_integer<unsigned char>(right);
+            }),
+        "ARM EABI getcwd returns the guest virtual path");
+
+    check(write_string(path_address, "/data/data/org.example.syscall/../../host"),
+        "hostile guest path is staged");
+    state.r[7] = 5; // open
+    state.r[0] = path_address;
+    state.r[1] = O_RDONLY;
+    state.r[2] = 0;
+    (void)dispatcher.handle(state, 0, memory);
+    check(std::bit_cast<std::int32_t>(state.r[0]) == -EACCES,
+        "SVC open rejects path traversal rather than reaching the host filesystem");
+
+    state.r[7] = 192; // mmap2 anonymous, private, RW
+    state.r[0] = 0;
+    state.r[1] = 4096;
+    state.r[2] = 3;
+    state.r[3] = 0x22;
+    state.r[4] = 0xffffffffU;
+    state.r[5] = 0;
+    (void)dispatcher.handle(state, 0, memory);
+    const auto mapping = state.r[0];
+    check(mapping == 0x60000000U && memory.is_accessible(GuestAddress32{mapping}, 4096, GuestPermission::Write),
+        "ARM EABI mmap2 allocates a bounded guest-memory mapping");
+    state.r[7] = 125; // mprotect
+    state.r[0] = mapping;
+    state.r[1] = 4096;
+    state.r[2] = 1;
+    (void)dispatcher.handle(state, 0, memory);
+    check(std::bit_cast<std::int32_t>(state.r[0]) == 0
+            && memory.is_accessible(GuestAddress32{mapping}, 4096, GuestPermission::Read)
+            && !memory.is_accessible(GuestAddress32{mapping}, 4096, GuestPermission::Write),
+        "ARM EABI mprotect updates guest mapping permissions");
+    state.r[7] = 125;
+    state.r[0] = mapping;
+    state.r[1] = 4096;
+    state.r[2] = 3;
+    (void)dispatcher.handle(state, 0, memory);
+    check(std::bit_cast<std::int32_t>(state.r[0]) == 0, "ARM EABI mprotect restores guest mapping permissions");
+    state.r[7] = 91; // munmap
+    state.r[0] = mapping;
+    state.r[1] = 4096;
+    (void)dispatcher.handle(state, 0, memory);
+    check(std::bit_cast<std::int32_t>(state.r[0]) == 0 && !memory.is_mapped(GuestAddress32{mapping}),
+        "ARM EABI munmap releases the guest mapping");
+
+    state.r[7] = 45; // brk
+    state.r[0] = 0x30000010U;
+    (void)dispatcher.handle(state, 0, memory);
+    check(state.r[0] == 0x30000010U && memory.is_mapped(GuestAddress32{0x30000000U}, 16),
+        "ARM EABI brk grows a bounded 32-bit guest heap segment");
+
+    state.r[7] = 999999;
+    (void)dispatcher.handle(state, 0, memory);
+    check(std::bit_cast<std::int32_t>(state.r[0]) == -ENOSYS,
+        "unknown ARM EABI syscalls fail closed with ENOSYS");
+    state.r[7] = 1;
+    state.r[0] = 42;
+    const auto exit = dispatcher.handle(state, 0, memory);
+    check(exit.action == GuestHookAction::Stop && exit.diagnostic.find("42") != std::string::npos,
+        "ARM EABI exit stops the guest execution loop with its status");
+    std::filesystem::remove_all(root, error);
+}
+
+void test_guest_heap_allocation_and_coalescing() {
+    using namespace retrobridge::runtime;
+    GuestMemory memory(8192);
+    GuestHeap32 heap(memory);
+    check(heap.initialize(GuestAddress32{0x10000000U}, 4096), "guest heap maps into guest address space");
+    check(heap.initialized() && heap.capacity() == 4096, "guest heap reports its mapped capacity");
+
+    const auto first = heap.malloc(13);
+    const auto second = heap.calloc(4, 4);
+    check(first.has_value() && (first->value() & 7U) == 0,
+        "malloc returns an 8-byte-aligned 32-bit guest address");
+    check(second.has_value() && (second->value() & 7U) == 0,
+        "calloc returns an 8-byte-aligned guest address");
+    if (first.has_value() && second.has_value()) {
+        std::array<std::byte, 16> zeroes{};
+        check(memory.read(*second, zeroes) && std::all_of(zeroes.begin(), zeroes.end(),
+            [](std::byte value) { return value == std::byte{0}; }), "calloc zeroes reused guest memory");
+        const std::array<std::byte, 4> marker{std::byte{0x11}, std::byte{0x22}, std::byte{0x33}, std::byte{0x44}};
+        check(memory.write(*first, marker), "guest heap allocations are writable guest memory");
+        const auto grown = heap.realloc(*first, 64);
+        check(grown.has_value() && heap.allocation_size(*grown).value_or(0) >= 64,
+            "realloc grows a guest allocation");
+        if (grown.has_value()) {
+            std::array<std::byte, 4> retained{};
+            check(memory.read(*grown, retained) && retained == marker,
+                "realloc preserves the original guest bytes");
+            check(heap.free(*grown), "grown guest allocation frees");
+        }
+        check(heap.free(*second), "calloc allocation frees");
+    }
+    check(!heap.free(first.value_or(GuestAddress32{0})), "realloc-invalidated guest address cannot be freed twice");
+
+    GuestAddress32 aligned{0};
+    check(heap.posix_memalign(&aligned, 64, 100) == 0 && (aligned.value() & 63U) == 0,
+        "posix_memalign honors guest alignment");
+    check(heap.free(aligned), "posix_memalign allocation frees");
+    check(heap.posix_memalign(&aligned, 12, 16) == 22, "invalid POSIX alignment returns EINVAL");
+    check(!heap.calloc(std::numeric_limits<std::size_t>::max(), 2).has_value(),
+        "calloc detects size multiplication overflow");
+
+    const auto whole_heap = heap.malloc(4096);
+    check(whole_heap.has_value(), "free-list blocks coalesce to recover the complete heap");
+    if (whole_heap.has_value()) check(heap.free(*whole_heap), "full guest heap allocation frees");
+    heap.shutdown();
+    check(!memory.is_mapped(GuestAddress32{0x10000000U}), "heap shutdown unmaps its guest arena");
+}
+
 void test_a32_t32_execution_svc_and_trampolines() {
     using namespace retrobridge::runtime;
     GuestMemory memory(0x10000);
@@ -480,6 +800,14 @@ void test_capabilities_and_optional_dbt_placeholder() {
     check(retrobridge::runtime::current_capabilities().arm32_elf_metadata_validation, "ELF metadata validation is reported available");
     check(retrobridge::runtime::current_capabilities().guest_elf_mapping_and_supported_relocations,
         "guest ELF mapping and relocation support is reported available");
+    check(retrobridge::runtime::current_capabilities().guest_heap_allocator,
+        "guest heap allocation is reported available");
+    check(retrobridge::runtime::current_capabilities().native_guest_vfs,
+        "native app-private guest VFS is reported available");
+    check(retrobridge::runtime::current_capabilities().arm32_eabi_syscall_subset,
+        "the implemented ARM32 EABI syscall subset is reported available");
+    check(!retrobridge::runtime::current_capabilities().bionic_and_guest_syscalls,
+        "unimplemented Bionic symbols and syscalls are not reported as complete");
     check(retrobridge::runtime::current_capabilities().arm32_instruction_execution,
         "bounded ARM instruction interpretation is reported available");
     check(!retrobridge::runtime::current_capabilities().arbitrary_guest_execution,
@@ -494,6 +822,10 @@ int main() {
     test_elf32_loader_maps_symbols_relocations_and_constructors();
     test_elf_validation_and_dependencies();
     test_opaque_handles_and_generation();
+    test_native_vfs_path_translation();
+    test_native_vfs_io_and_descriptors();
+    test_guest_heap_allocation_and_coalescing();
+    test_arm32_syscall_dispatcher_and_guest_vfs();
     test_a32_t32_execution_svc_and_trampolines();
     test_capabilities_and_optional_dbt_placeholder();
     if (failures != 0) {

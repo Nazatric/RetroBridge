@@ -163,6 +163,27 @@ bool GuestMemory::is_mapped(GuestAddress32 address, std::uint64_t length) const 
     return true;
 }
 
+bool GuestMemory::is_accessible(
+    GuestAddress32 address,
+    std::uint64_t length,
+    GuestPermission required) const noexcept {
+    if (length == 0) return true;
+    const auto requested_end = static_cast<std::uint64_t>(address.value()) + length;
+    if (requested_end > (std::uint64_t{1} << 32)) return false;
+    auto cursor = static_cast<std::uint64_t>(address.value());
+    while (cursor < requested_end) {
+        const auto lookup = regions_.upper_bound(static_cast<std::uint32_t>(cursor));
+        if (lookup == regions_.begin()) return false;
+        const auto region = std::prev(lookup);
+        const auto region_begin = static_cast<std::uint64_t>(region->second.base.value());
+        const auto region_end = region_begin + region->second.range.size();
+        if (cursor < region_begin || cursor >= region_end
+            || !has_permission(region->second.permissions, required)) return false;
+        cursor = std::min(requested_end, region_end);
+    }
+    return true;
+}
+
 bool GuestMemory::is_executable(GuestAddress32 address) const noexcept {
     const auto lookup = regions_.upper_bound(address.value());
     if (lookup == regions_.begin()) return false;
