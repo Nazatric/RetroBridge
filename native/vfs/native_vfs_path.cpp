@@ -143,7 +143,7 @@ std::optional<std::filesystem::path> NativeVfsPathTranslator::translate_absolute
             }
         }
         candidate = candidate.lexically_normal();
-        if (!candidate.is_absolute() || !candidate.starts_with(app_root_)) {
+        if (!candidate.is_absolute() || !relative_to_app_root(candidate).has_value()) {
             return fail("translated guest path escaped the application root");
         }
         if (!reject_symlinks(candidate)) return fail("guest path crosses a symbolic link");
