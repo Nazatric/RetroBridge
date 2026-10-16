@@ -23,6 +23,15 @@ enum class ElfDiagnosticCode {
     InvalidDynamicSection,
     MissingDynamicStringTable,
     InvalidNeededLibraryName,
+    InvalidLoadBias,
+    MappingFailed,
+    InvalidDynamicSymbolTable,
+    InvalidHashTable,
+    InvalidRelocationTable,
+    UnsupportedRelocation,
+    UndefinedSymbol,
+    InvalidRelocationTarget,
+    UnsupportedDynamicFeature,
 };
 
 struct ElfDiagnostic final {

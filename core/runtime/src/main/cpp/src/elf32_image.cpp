@@ -21,6 +21,7 @@ constexpr std::uint16_t kTypeExecutable = 2;
 constexpr std::uint16_t kTypeSharedObject = 3;
 constexpr std::uint32_t kProgramLoad = 1;
 constexpr std::uint32_t kProgramDynamic = 2;
+constexpr std::uint32_t kMaximumDynamicEntries = 65'536U;
 constexpr std::uint32_t kDynamicNull = 0;
 constexpr std::uint32_t kDynamicNeeded = 1;
 constexpr std::uint32_t kDynamicStringTable = 5;
@@ -62,6 +63,15 @@ constexpr std::uint32_t kDynamicStringSize = 10;
         case ElfDiagnosticCode::InvalidDynamicSection: return "invalid-dynamic-section";
         case ElfDiagnosticCode::MissingDynamicStringTable: return "missing-dynamic-string-table";
         case ElfDiagnosticCode::InvalidNeededLibraryName: return "invalid-needed-library-name";
+        case ElfDiagnosticCode::InvalidLoadBias: return "invalid-load-bias";
+        case ElfDiagnosticCode::MappingFailed: return "mapping-failed";
+        case ElfDiagnosticCode::InvalidDynamicSymbolTable: return "invalid-dynamic-symbol-table";
+        case ElfDiagnosticCode::InvalidHashTable: return "invalid-hash-table";
+        case ElfDiagnosticCode::InvalidRelocationTable: return "invalid-relocation-table";
+        case ElfDiagnosticCode::UnsupportedRelocation: return "unsupported-relocation";
+        case ElfDiagnosticCode::UndefinedSymbol: return "undefined-symbol";
+        case ElfDiagnosticCode::InvalidRelocationTarget: return "invalid-relocation-target";
+        case ElfDiagnosticCode::UnsupportedDynamicFeature: return "unsupported-dynamic-feature";
     }
     return "unknown-elf-error";
 }
@@ -174,8 +184,9 @@ std::variant<Elf32Image, ElfDiagnostic> Elf32Image::parse(
 
     if (!dynamic_segment.has_value()) return image;
     const auto& dynamic = *dynamic_segment;
-    if (dynamic.file_size % kDynamicEntrySize != 0) {
-        return fail(ElfDiagnosticCode::InvalidDynamicSection, "dynamic section is not a whole number of ELF32 entries");
+    if (dynamic.file_size % kDynamicEntrySize != 0 || dynamic.file_size > dynamic.memory_size
+        || dynamic.file_size / kDynamicEntrySize > kMaximumDynamicEntries) {
+        return fail(ElfDiagnosticCode::InvalidDynamicSection, "dynamic section has invalid size or entry count");
     }
 
     std::optional<std::uint32_t> string_table_address;

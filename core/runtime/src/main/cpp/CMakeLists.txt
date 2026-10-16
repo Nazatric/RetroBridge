@@ -3,6 +3,8 @@ project(retrobridge_runtime LANGUAGES CXX)
 
 set(RETROBRIDGE_RUNTIME_SOURCES
     src/elf32_image.cpp
+    src/guest_memory.cpp
+    src/elf32_loader.cpp
     src/handle_table.cpp
     src/translation_engine.cpp
 )
