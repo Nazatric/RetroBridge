@@ -140,6 +140,14 @@ jobs:
               echo "::error title=RetroBridge diagnostic base64 ($log)::$message"
             fi
           done
+          native_errors="$(grep -n -E 'error:|fatal error:|undefined reference|FAILED:' diagnostics/native-build.log 2>/dev/null | tail -n 40 || true)"
+          if [[ -n "$native_errors" ]]; then
+            echo "### Native compiler errors" >> "$GITHUB_STEP_SUMMARY"
+            echo '```text' >> "$GITHUB_STEP_SUMMARY"
+            printf '%s\n' "$native_errors" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=RetroBridge native compiler errors::$native_errors"
+          fi
           test_failures="$(find . -path '*/build/test-results/*/*.xml' -type f -exec grep -H -n -A 12 -B 2 -E '<failure|<error' {} + || true)"
           if [[ -n "$test_failures" ]]; then
             echo "::error title=RetroBridge JUnit failures base64::$(printf '%s' "$test_failures" | base64 -w0)"
