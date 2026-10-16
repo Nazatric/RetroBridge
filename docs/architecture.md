@@ -4,7 +4,7 @@ RetroBridge is split so a later guest runtime can be developed without conflatin
 
 ## Process and trust boundaries
 
-- `:app` is the normal management process. It imports a selected base APK into app-private storage, keeps registry metadata, and displays explicit capability status.
+- `:app` is the normal management process. It imports a selected base APK into app-private storage, keeps registry metadata, and displays explicit capability status. Its bounded APK-native ELF preflight reads only `.so` headers/program headers, checks ABI agreement and basic `PT_LOAD` ranges, and records warnings; it is not a linker or a loadability guarantee.
 - `:core:runtime` contributes a native `arm64-v8a` library and declares a non-exported `GuestRuntimeService` in `android:process=":guest_runtime"`. The service immediately rejects start requests. The process boundary is reserved, not an active execution sandbox.
 - `:core:manager` owns immutable guest metadata, an atomic JSON registry, and lifecycle transition validation.
 - `:core:fs` owns the per-import filesystem layout, narrow guest-path mapper, quota-bounded streaming Android/data and OBB ZIP import, and SAF-export ZIP writer. It is not a mount namespace and does not grant access to arbitrary external storage.

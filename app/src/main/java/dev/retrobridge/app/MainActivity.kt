@@ -296,8 +296,8 @@ private fun AppListScreen(
         Text("RetroBridge", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Text("ARM32 compatibility runtime · experimental prototype", style = MaterialTheme.typography.bodyMedium)
         WarningCard(
-            title = "Guest execution is not implemented",
-            body = "RetroBridge can import and inspect APK metadata, but it cannot launch 32-bit apps. ARM instruction translation, the guest linker/Bionic, JNI, and framework services are not yet available.",
+            title = "Guest APK launch is not implemented",
+            body = "APK metadata and bounded ELF structural checks are available. Host-side ARM32, heap/VFS, Bionic, and JNI primitives are partial test slices only; they are not connected to Android framework services or APK launch. Imported code is not executed.",
         )
         if (registryProblem != null) {
             WarningCard("Registry could not be opened", registryProblem)
@@ -317,7 +317,7 @@ private fun AppListScreen(
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(record.displayName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                         Text(record.packageName, style = MaterialTheme.typography.bodySmall)
-                        Text("State: ${record.state.name.lowercase()} · ABI: ${record.guestAbis.joinToString().ifBlank { "no bundled native ABI detected" }}")
+                        Text("State: ${record.state.name.lowercase()} · Bundled ABI folder(s): ${record.guestAbis.joinToString().ifBlank { "none detected" }}")
                     }
                 }
             }
@@ -374,7 +374,8 @@ private fun AppDetailsScreen(
         InfoRow("Package", record.packageName)
         InfoRow("Version", "${record.versionName ?: "unknown"} (${record.versionCode})")
         InfoRow("SDK range", "min ${record.minSdk ?: "unknown"} · target ${record.targetSdk ?: "unknown"}")
-        InfoRow("Guest ABI(s)", record.guestAbis.joinToString().ifBlank { "No bundled native libraries detected" })
+        InfoRow("Bundled native ABI folders", record.guestAbis.joinToString().ifBlank { "None detected" })
+        InfoRow("Native ELF preflight", "Structural metadata only; not proof of library loadability")
         InfoRow(
             "Bundled native libraries",
             record.nativeLibraries.toSortedMap().entries.joinToString("; ") { (abi, names) -> "$abi: ${names.joinToString()}" }

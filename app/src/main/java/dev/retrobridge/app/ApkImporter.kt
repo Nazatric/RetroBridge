@@ -12,6 +12,7 @@ import dev.retrobridge.manager.AttachmentState
 import dev.retrobridge.manager.GuestAppRecord
 import dev.retrobridge.manager.GuestAppRepository
 import dev.retrobridge.manager.GuestAppState
+import dev.retrobridge.manager.GuestDiagnostic
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
@@ -20,6 +21,11 @@ import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.zip.ZipFile
+
+private data class NativeLibraryInspection(
+    val libraries: Map<String, List<String>>,
+    val diagnostics: List<GuestDiagnostic>,
+)
 
 /** Copies a selected APK into private storage; it does not install or execute the package. */
 class ApkImporter(
@@ -48,7 +54,7 @@ class ApkImporter(
                 ?: throw IllegalArgumentException("APK manifest has no package name")
             val displayName = applicationContext.packageManager.getApplicationLabel(appInfo)
                 .toString().takeIf(String::isNotBlank) ?: packageName
-            val nativeLibraries = inspectNativeLibraries(temporaryApk)
+            val nativeLibraryInspection = inspectNativeLibraries(temporaryApk)
             @Suppress("DEPRECATION")
             val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 packageInfo.longVersionCode
@@ -80,8 +86,9 @@ class ApkImporter(
                 targetSdk = appInfo.targetSdkVersion.takeIf { it > 0 },
                 originalApkPath = relativeApk,
                 sha256 = digest.digest().toHexString(),
-                guestAbis = nativeLibraries.keys.sorted(),
-                nativeLibraries = nativeLibraries,
+                guestAbis = nativeLibraryInspection.libraries.keys.sorted(),
+                nativeLibraries = nativeLibraryInspection.libraries,
+                diagnostics = nativeLibraryInspection.diagnostics,
                 isolatedRoot = relativeRoot,
                 dataArchiveState = AttachmentState.NOT_PROVIDED,
                 obbState = AttachmentState.NOT_PROVIDED,
@@ -202,23 +209,97 @@ class ApkImporter(
             ?: throw IllegalArgumentException("Selected document is not a readable Android APK")
     }
 
-    private fun inspectNativeLibraries(apk: Path): Map<String, List<String>> {
+    private fun inspectNativeLibraries(apk: Path): NativeLibraryInspection {
         val knownAbis = setOf("armeabi-v7a", "armeabi", "arm64-v8a", "x86", "x86_64", "riscv64")
         val libraries = mutableMapOf<String, MutableSet<String>>()
+        val diagnostics = mutableListOf(
+            GuestDiagnostic(
+                timestampEpochMs = System.currentTimeMillis(),
+                severity = "INFO",
+                component = "APK native preflight",
+                message = "ELF header checks do not establish library loadability",
+                detail = "Passing this bounded structural preflight does not validate dependencies, relocations, symbols, or guest APK launch support.",
+            ),
+        )
+        var scannedEntries = 0
+        var scannedLibraries = 0
+        var preflightedLibraries = 0
+        var preflightLimitReported = false
+        var omittedDiagnostics = 0
+        val timestamp = System.currentTimeMillis()
+        fun report(message: String, detail: String? = null) {
+            if (diagnostics.size < MAX_NATIVE_PREFLIGHT_DIAGNOSTICS) {
+                diagnostics += GuestDiagnostic(
+                    timestampEpochMs = timestamp,
+                    severity = "WARNING",
+                    component = "APK native preflight",
+                    message = message,
+                    detail = detail?.take(1024),
+                )
+            } else {
+                omittedDiagnostics++
+            }
+        }
+
         ZipFile(apk.toFile()).use { zip ->
             val entries = zip.entries()
             while (entries.hasMoreElements()) {
+                if (++scannedEntries > MAX_APK_ZIP_ENTRIES) {
+                    report("APK contains more ZIP entries than the preflight limit", "Remaining entries were not scanned")
+                    break
+                }
                 val entry = entries.nextElement()
-                if (entry.isDirectory) continue
+                if (entry.isDirectory || !entry.name.endsWith(".so")) continue
                 val components = entry.name.split('/')
-                if (components.size >= 3 && components[0] == "lib" && components[1] in knownAbis
-                    && components.last().endsWith(".so")
+                if (components.firstOrNull() != "lib") continue
+                if (++scannedLibraries > MAX_NATIVE_LIBRARY_ENTRIES) {
+                    report("APK contains more native libraries than the preflight limit", "Remaining libraries were not scanned")
+                    break
+                }
+                if (entry.name.length > 4_096 || components.size != 3 || components[1] !in knownAbis
+                    || components[2].length <= 3 || components[2].length > 256
                 ) {
-                    libraries.getOrPut(components[1]) { linkedSetOf() }.add(components.last())
+                    report("Native library has an unsupported archive path", entry.name)
+                    continue
+                }
+
+                val abi = components[1]
+                val name = components[2]
+                libraries.getOrPut(abi) { linkedSetOf() }.add(name)
+                if (preflightedLibraries >= MAX_NATIVE_LIBRARY_PREFLIGHTS) {
+                    if (!preflightLimitReported) {
+                        report("Native ELF preflight byte-work limit reached", "Additional native libraries were cataloged by filename only")
+                        preflightLimitReported = true
+                    }
+                    continue
+                }
+                preflightedLibraries++
+                val result = try {
+                    zip.getInputStream(entry).use { stream ->
+                        NativeElfPreflight.inspect(abi, entry.name.take(1024), entry.size, stream)
+                    }
+                } catch (failure: Exception) {
+                    report("Native library preflight could not read the ELF entry", "${entry.name}: ${failure.message ?: failure.javaClass.simpleName}")
+                    continue
+                }
+                result.diagnostic?.let { reason ->
+                    report("Native library did not pass the bounded ELF preflight", "${entry.name}: $reason")
                 }
             }
         }
-        return libraries.mapValues { (_, names) -> names.sorted() }.toSortedMap()
+        if (omittedDiagnostics > 0) {
+            diagnostics += GuestDiagnostic(
+                timestampEpochMs = timestamp,
+                severity = "WARNING",
+                component = "APK native preflight",
+                message = "Additional native preflight diagnostics were omitted",
+                detail = "$omittedDiagnostics diagnostic(s) omitted to bound registry size",
+            )
+        }
+        return NativeLibraryInspection(
+            libraries = libraries.mapValues { (_, names) -> names.sorted() }.toSortedMap(),
+            diagnostics = diagnostics,
+        )
     }
 
     private fun Path.toPortableString(): String = toString().replace(File.separatorChar, '/')
@@ -229,5 +310,9 @@ class ApkImporter(
 
     companion object {
         private const val MAX_APK_BYTES = 2L * 1024 * 1024 * 1024
+        private const val MAX_APK_ZIP_ENTRIES = 100_000
+        private const val MAX_NATIVE_LIBRARY_ENTRIES = 8_192
+        private const val MAX_NATIVE_LIBRARY_PREFLIGHTS = 256
+        private const val MAX_NATIVE_PREFLIGHT_DIAGNOSTICS = 64
     }
 }

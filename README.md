@@ -4,7 +4,7 @@ RetroBridge is an experimental, rootless-first research project for inspecting a
 
 ## Honest status
 
-- APK metadata import and private per-app storage: prototype implementation.
+- APK metadata import and private per-app storage: prototype implementation. Bundled `.so` files receive bounded ELF header and `PT_LOAD` structural preflight; warnings are stored with the guest record. Passing preflight is not a claim that a library can be linked, loaded, or executed.
 - Android/data ZIP import, associated OBB import, and SAF guest-data/OBB-manifest export: implemented with streaming quotas, package/path validation, symlink rejection, and transactional file replacement.
 - ARM32 ELF32 segment mapping, bounded ARM relocation, dynamic symbol lookup, and constructor/destructor address validation: implemented and exercised with synthetic native tests.
 - A bounded A32/T32 interpreter supports an explicit instruction subset, SVC callbacks, and registered guest-address trampolines. CI executes both hand-authored interpreter tests and a cross-compiled ARM32 ELF fixture.
