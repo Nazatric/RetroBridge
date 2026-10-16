@@ -120,7 +120,7 @@ class NativeElfPreflightTest {
             buffer.putInt(68, 4)       // p_filesz
             buffer.putInt(72, 4)       // p_memsz
             buffer.putInt(76, 5)       // PF_R | PF_X
-            buffer.putInt(80, 0x1000)  // p_align
+            buffer.putInt(80, 0x100)   // p_align
         }
         return bytes
     }
@@ -149,7 +149,7 @@ class NativeElfPreflightTest {
         buffer.putLong(88, 0)
         buffer.putLong(96, 4)
         buffer.putLong(104, 4)
-        buffer.putLong(112, 0x1000)
+        buffer.putLong(112, 0x100)
         return bytes
     }
 }
