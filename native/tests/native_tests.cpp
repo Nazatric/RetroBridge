@@ -806,12 +806,12 @@ void test_synthetic_jni_java_vm_tables_and_handles() {
     state.r[1] = string_handle;
     state.r[2] = 0x10400U;
     auto [chars_state, chars_execution] = invoke_jni(169, state); // GetStringUTFChars
-    std::array<std::byte, 13> utf8_readback{};
+    std::array<std::byte, 14> utf8_readback{};
+    const std::array<std::byte, 14> expected_utf8{std::byte{'h'}, std::byte{'e'}, std::byte{'l'}, std::byte{'l'}, std::byte{'o'},
+        std::byte{' '}, std::byte{'J'}, std::byte{'N'}, std::byte{'I'}, std::byte{' '}, std::byte{0xe2}, std::byte{0x98},
+        std::byte{0x83}, std::byte{0}};
     check(chars_execution.status == ExecutionStatus::Completed && chars_state.r[0] != 0
-            && memory.read(GuestAddress32{chars_state.r[0]}, utf8_readback)
-            && std::equal(utf8_readback.begin(), utf8_readback.end(),
-                std::array<std::byte, 13>{std::byte{'h'}, std::byte{'e'}, std::byte{'l'}, std::byte{'l'}, std::byte{'o'},
-                    std::byte{' '}, std::byte{0xe2}, std::byte{0x98}, std::byte{0x83}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}}.begin()),
+            && memory.read(GuestAddress32{chars_state.r[0]}, utf8_readback) && utf8_readback == expected_utf8,
         "JNI GetStringUTFChars copies guest-visible UTF-8 bytes into the guest heap");
     state = {};
     state.r[0] = env;

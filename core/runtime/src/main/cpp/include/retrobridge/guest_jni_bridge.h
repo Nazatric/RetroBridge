@@ -41,6 +41,10 @@ private:
     enum class ObjectKind : std::uint8_t { Class, Instance, String, ByteArray, IntArray, ObjectArray, Throwable };
     enum class PinKind : std::uint8_t { Utf8String, Utf16String, ByteArray, IntArray };
     struct Object final {
+        Object() = default;
+        Object(ObjectKind object_kind, const std::string& object_class, const std::string& string = {})
+            : kind(object_kind), class_name(object_class), string_value(string) {}
+
         ObjectKind kind = ObjectKind::Instance;
         std::string class_name;
         std::string string_value;
