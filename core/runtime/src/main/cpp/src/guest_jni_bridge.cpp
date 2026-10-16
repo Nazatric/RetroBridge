@@ -901,7 +901,7 @@ bool GuestJniBridge::initialize(std::string* diagnostic) {
 
 void GuestJniBridge::shutdown() noexcept {
     for (auto address = trampoline_allocations_.rbegin(); address != trampoline_allocations_.rend(); ++address) {
-        (void)trampolines_.unregister_trampoline(GuestAddress32{*address});
+        (void)trampolines_.unregister_trampoline(*address);
     }
     trampoline_allocations_.clear();
     for (auto address = string_pins_.begin(); address != string_pins_.end(); ++address) (void)heap_.free(address->second.address);
@@ -963,7 +963,7 @@ std::optional<std::uint32_t> GuestJniBridge::register_callback(std::string name,
         return std::nullopt;
     }
     try {
-        trampoline_allocations_.push_back(address);
+        trampoline_allocations_.push_back(GuestAddress32{address});
     } catch (...) {
         (void)trampolines_.unregister_trampoline(GuestAddress32{address});
         return std::nullopt;
