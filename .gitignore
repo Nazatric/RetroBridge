@@ -1,0 +1,18 @@
+# Gradle / Android
+.gradle/
+**/build/
+**/.cxx/
+local.properties
+*.iml
+.idea/
+.DS_Store
+
+# Native host builds and generated ARM32 fixtures
+/native/build/
+CMakeUserPresets.json
+
+# Temporary/imported app data (never commit user APKs)
+*.apk
+*.obb
+*.apks
+*.aab

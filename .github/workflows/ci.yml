@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: retrobridge-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Android, native host, and ARM32 fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle and cache Gradle user home
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Verify preinstalled Android SDK and NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${ANDROID_HOME:?GitHub runner did not provide ANDROID_HOME}"
+          if [[ -z "${ANDROID_NDK_LATEST_HOME:-}" ]]; then
+            echo "ANDROID_NDK_LATEST_HOME is missing on this runner." >&2
+            exit 1
+          fi
+          : "${ANDROID_NDK_LATEST_HOME:?}"
+          [[ -d "$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64" ]]
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          echo "Android SDK: $ANDROID_HOME"
+          echo "Android NDK: $ANDROID_NDK_LATEST_HOME"
+          echo "Installed SDK packages (relevant subset):"
+          if [[ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]]; then
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          else
+            SDKMANAGER="$(command -v sdkmanager)"
+          fi
+          "$SDKMANAGER" --list_installed | grep -E 'platforms;android-35|build-tools;35|cmake;3.22' || true
+
+      - name: Cache native CMake build directories
+        uses: actions/cache@v4
+        with:
+          path: |
+            native/build/host
+            native/build/arm32-fixtures
+            core/runtime/.cxx
+          key: ${{ runner.os }}-retrobridge-cmake-${{ hashFiles('native/CMakeLists.txt', 'native/**/*.cpp', 'core/runtime/src/main/cpp/**') }}
+          restore-keys: |
+            ${{ runner.os }}-retrobridge-cmake-
+
+      - name: Ensure Android API and CMake packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]]; then
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          else
+            SDKMANAGER="$(command -v sdkmanager)"
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0" "cmake;3.22.1"
+
+      - name: Cross-compile ARM32 executable and shared-library fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CC="$NDK_BIN/armv7a-linux-androideabi23-clang"
+          mkdir -p native/build/arm32-fixtures diagnostics
+          "$CC" -fPIE -pie -nostdlib \
+            -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables \
+            -Wl,-e,_start -Wl,--build-id=none \
+            native/fixtures/arm32_guest_entry.c \
+            -o native/build/arm32-fixtures/guest_arm32
+          "$CC" -fPIC -shared \
+            -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables \
+            -Wl,-soname,libretrobridge_fixture.so -Wl,--build-id=none \
+            native/fixtures/arm32_shared_fixture.c \
+            -o native/build/arm32-fixtures/libretrobridge_fixture.so
+          file native/build/arm32-fixtures/* | tee diagnostics/arm32-fixtures.log
+
+      - name: Configure and build native host verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S native -B native/build/host \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DRETROBRIDGE_ARM32_EXECUTABLE="$GITHUB_WORKSPACE/native/build/arm32-fixtures/guest_arm32" \
+            -DRETROBRIDGE_ARM32_SHARED_LIBRARY="$GITHUB_WORKSPACE/native/build/arm32-fixtures/libretrobridge_fixture.so"
+          cmake --build native/build/host --parallel 2 2>&1 | tee diagnostics/native-build.log
+          ctest --test-dir native/build/host --output-on-failure 2>&1 | tee diagnostics/ctest.log
+
+      - name: Build arm64-v8a app and run Gradle unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --stacktrace --console=plain \
+            :app:assembleDebug \
+            :app:lintDebug \
+            :core:runtime:lintDebug \
+            :app:testDebugUnitTest \
+            :core:manager:test \
+            :core:fs:test \
+            :core:services:test 2>&1 | tee diagnostics/gradle.log
+
+      - name: Upload APKs, ELF fixtures, test binaries, and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrobridge-ci-${{ github.run_number }}
+          if-no-files-found: warn
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            native/build/arm32-fixtures/*
+            native/build/host/retrobridge_native_tests
+            native/build/host/retrobridge_elf_inspect
+            native/build/host/Testing/Temporary/LastTest.log
+            diagnostics/*.log
+            **/build/test-results/**/*.xml
+            **/build/reports/tests/**
