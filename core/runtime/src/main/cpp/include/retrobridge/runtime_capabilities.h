@@ -16,7 +16,7 @@ struct RuntimeCapabilities final {
     bool synthetic_jni = false;
     bool android_asset_manager_thunks = true;
     bool headless_native_window_buffers = true;
-    bool android_input_queue_and_looper = false;
+    bool synthetic_android_input_queue_looper_subset = true;
     bool headless_gles_egl = false;
     bool opensl_es_audio_thunks = false;
     bool android_framework_virtualization = false;

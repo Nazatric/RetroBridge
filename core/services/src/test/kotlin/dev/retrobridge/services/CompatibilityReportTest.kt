@@ -34,6 +34,10 @@ class CompatibilityReportTest {
             report.getValue("Headless ANativeWindow buffer subset").status,
         )
         assertEquals(
+            CapabilityStatus.PARTIAL,
+            report.getValue("Synthetic AInputQueue and ALooper subset").status,
+        )
+        assertEquals(
             CapabilityStatus.NOT_IMPLEMENTED,
             report.getValue("Execution of arbitrary guest APKs").status,
         )
@@ -45,7 +49,6 @@ class CompatibilityReportTest {
         val report = CompatibilityReport.capabilities.associateBy(Capability::name)
 
         listOf(
-            "ALooper and Android input queue",
             "Headless GLES/EGL",
             "OpenSL ES audio",
             "Guest IPC and Android framework virtualization",

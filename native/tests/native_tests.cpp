@@ -9,6 +9,7 @@
 #include "retrobridge/guest_bionic_thunks.h"
 #include "retrobridge/guest_android_asset_thunks.h"
 #include "retrobridge/guest_android_window_thunks.h"
+#include "retrobridge/guest_android_input_thunks.h"
 #include "retrobridge/handle_table.h"
 #include "retrobridge/runtime_capabilities.h"
 #include "arm32_syscall_dispatcher.h"
@@ -1398,6 +1399,284 @@ void test_headless_native_window_buffers_and_lifecycle() {
         "released native-window handles cannot access a later surface");
 }
 
+void test_synthetic_android_input_queue_and_looper() {
+    using namespace retrobridge::runtime;
+    constexpr std::uint32_t kReturnAddress = 0x8000U;
+    constexpr std::uint32_t kGuestData = 0x10000U;
+
+    GuestMemory memory(8U * 1024U * 1024U);
+    std::vector<std::byte> return_code(4, std::byte{0});
+    put_u32(return_code, 0, 0xef000000U);
+    check(memory.map_bytes(GuestAddress32{kReturnAddress}, return_code, return_code.size(),
+        GuestPermission::Read | GuestPermission::Execute), "input bridge return sentinel maps RX");
+    check(memory.map_zeroed(GuestAddress32{kGuestData}, 0x3000U,
+        GuestPermission::Read | GuestPermission::Write), "input bridge output structures map RW");
+    GuestHeap32 heap(memory);
+    check(heap.initialize(GuestAddress32{0x30000U}, 4U * 1024U * 1024U), "input bridge guest heap initializes");
+
+    GuestTrampolineRegistry trampolines;
+    GuestAndroidInputThunks input(memory, heap, trampolines);
+    std::string diagnostic;
+    check(input.install(&diagnostic), "bounded AInputQueue and ALooper thunk table installs");
+    check(input.resolve_symbol("AInputQueue_getEvent").has_value()
+            && input.resolve_symbol("AKeyEvent_getKeyCode").has_value()
+            && input.resolve_symbol("AMotionEvent_getX").has_value()
+            && input.resolve_symbol("ALooper_pollOnce").has_value(),
+        "synthetic input bridge resolves queue, event, and looper thunks");
+    const auto queue = input.create_input_queue(&diagnostic);
+    check(queue.has_value() && heap.allocation_size(GuestAddress32{queue.value_or(0)}).has_value(),
+        "host-created input queue is exposed through a guest-heap opaque handle");
+    if (!queue.has_value()) return;
+
+    const auto svc = [](GuestCpuState32& state, std::uint32_t immediate, GuestMemory&) {
+        if (immediate == 0 && state.r[7] == 1) return GuestHookResult{GuestHookAction::Stop, "input thunk return"};
+        return GuestHookResult{GuestHookAction::Fault, "unexpected input thunk SVC"};
+    };
+    Arm32Interpreter interpreter(memory, trampolines, svc);
+    const auto invoke = [&](std::string_view name, GuestCpuState32 state) {
+        const auto function = input.resolve_symbol(name);
+        if (!function.has_value()) {
+            check(false, "input test symbol resolves to a guest trampoline");
+            return std::pair{state, ExecutionResult{}};
+        }
+        state.r[7] = 1;
+        state.r[14] = kReturnAddress;
+        auto result = interpreter.run(state, GuestAddress32{*function}, 16);
+        check(result.status == ExecutionStatus::Completed, "input thunk returns through guest execution");
+        return std::pair{state, result};
+    };
+
+    GuestCpuState32 state{};
+    state.r[0] = *queue;
+    auto [empty_state, empty_result] = invoke("AInputQueue_hasEvents", state);
+    check(empty_result.status == ExecutionStatus::Completed && empty_state.r[0] == 0U,
+        "empty synthetic AInputQueue reports no pending events");
+    state = {};
+    state.r[0] = *queue;
+    state.r[1] = 0x10100U;
+    auto [would_block_state, would_block_result] = invoke("AInputQueue_getEvent", state);
+    check(would_block_result.status == ExecutionStatus::Completed
+            && would_block_state.r[0] == static_cast<std::uint32_t>(-EAGAIN),
+        "AInputQueue_getEvent returns EAGAIN when the injected queue is empty");
+
+    GuestInputEvent32 malformed{};
+    malformed.type = GuestInputEventType32::Motion;
+    malformed.down_time_ns = 1;
+    malformed.event_time_ns = 2;
+    check(!input.enqueue_input_event(*queue, malformed, &diagnostic),
+        "host injection rejects motion records without pointers");
+
+    GuestInputEvent32 key{};
+    key.type = GuestInputEventType32::Key;
+    key.device_id = -1;
+    key.source = 0x101;
+    key.action = 0;
+    key.key_code = 29;
+    key.meta_state = 2;
+    key.repeat_count = 1;
+    key.down_time_ns = 1'000'000;
+    key.event_time_ns = 2'000'000;
+    check(input.enqueue_input_event(*queue, key, &diagnostic), "host can enqueue a bounded key event");
+    state = {};
+    state.r[0] = *queue;
+    state.r[1] = kReturnAddress; // RX-only memory is not a writable AInputEvent**.
+    auto [bad_output_state, bad_output_result] = invoke("AInputQueue_getEvent", state);
+    check(bad_output_result.status == ExecutionStatus::Completed
+            && bad_output_state.r[0] == static_cast<std::uint32_t>(-EFAULT),
+        "AInputQueue_getEvent rejects a non-writable event output pointer");
+    state = {};
+    state.r[0] = *queue;
+    auto [still_pending_state, still_pending_result] = invoke("AInputQueue_hasEvents", state);
+    check(still_pending_result.status == ExecutionStatus::Completed && still_pending_state.r[0] == 1U,
+        "invalid output memory does not consume an input event");
+
+    state = {};
+    state.r[0] = *queue;
+    state.r[1] = 0x10100U;
+    auto [get_key_state, get_key_result] = invoke("AInputQueue_getEvent", state);
+    const auto key_handle = memory.read_u32(GuestAddress32{0x10100U}).value_or(0U);
+    check(get_key_result.status == ExecutionStatus::Completed && get_key_state.r[0] == 0U
+            && key_handle != 0 && heap.allocation_size(GuestAddress32{key_handle}).has_value(),
+        "AInputQueue_getEvent returns a guest-heap opaque AInputEvent handle");
+    if (key_handle == 0) return;
+    state = {};
+    state.r[0] = *queue;
+    auto [empty_after_get_state, empty_after_get_result] = invoke("AInputQueue_hasEvents", state);
+    check(empty_after_get_result.status == ExecutionStatus::Completed && empty_after_get_state.r[0] == 0U,
+        "dequeued key events leave the pending queue while outstanding");
+
+    state = {};
+    state.r[0] = key_handle;
+    auto [key_type_state, key_type_result] = invoke("AInputEvent_getType", state);
+    check(key_type_result.status == ExecutionStatus::Completed && key_type_state.r[0] == 1U,
+        "AInputEvent_getType returns AINPUT_EVENT_TYPE_KEY for a key record");
+    state = {};
+    state.r[0] = key_handle;
+    auto [key_code_state, key_code_result] = invoke("AKeyEvent_getKeyCode", state);
+    check(key_code_result.status == ExecutionStatus::Completed && key_code_state.r[0] == 29U,
+        "AKeyEvent_getKeyCode marshals the injected key code");
+    state = {};
+    state.r[0] = key_handle;
+    auto [key_source_state, key_source_result] = invoke("AInputEvent_getSource", state);
+    check(key_source_result.status == ExecutionStatus::Completed && key_source_state.r[0] == 0x101U,
+        "AInputEvent_getSource preserves the Android source mask");
+    state = {};
+    state.r[0] = key_handle;
+    auto [key_time_state, key_time_result] = invoke("AKeyEvent_getEventTime", state);
+    check(key_time_result.status == ExecutionStatus::Completed
+            && key_time_state.r[0] == 2'000'000U && key_time_state.r[1] == 0U,
+        "AKeyEvent_getEventTime returns 64-bit nanoseconds in ARM32 r0/r1");
+    state = {};
+    state.r[0] = *queue;
+    state.r[1] = key_handle;
+    auto [pre_dispatch_state, pre_dispatch_result] = invoke("AInputQueue_preDispatchEvent", state);
+    check(pre_dispatch_result.status == ExecutionStatus::Completed && pre_dispatch_state.r[0] == 0U,
+        "AInputQueue_preDispatchEvent reports no framework or IME interception");
+    state.r[0] = *queue;
+    state.r[1] = key_handle;
+    state.r[2] = 1;
+    (void)invoke("AInputQueue_finishEvent", state);
+    state = {};
+    state.r[0] = key_handle;
+    auto [stale_key_state, stale_key_result] = invoke("AInputEvent_getType", state);
+    check(stale_key_result.status == ExecutionStatus::Completed && stale_key_state.r[0] == 0U,
+        "AInputQueue_finishEvent invalidates the event handle");
+
+    GuestInputEvent32 motion{};
+    motion.type = GuestInputEventType32::Motion;
+    motion.device_id = 3;
+    motion.source = 0x1002;
+    motion.action = 2;
+    motion.meta_state = 4;
+    motion.down_time_ns = 2'500'000;
+    motion.event_time_ns = 3'000'000;
+    motion.pointers.push_back(GuestMotionPointer32{4, 12.5F, -3.25F, 0.75F});
+    check(input.enqueue_input_event(*queue, motion, &diagnostic), "host can enqueue a bounded motion event");
+    check(memory.write_u32(GuestAddress32{0x10100U}, 0U), "clear the guest event output before motion dequeue");
+    state = {};
+    state.r[0] = *queue;
+    state.r[1] = 0x10100U;
+    auto [get_motion_state, get_motion_result] = invoke("AInputQueue_getEvent", state);
+    const auto motion_handle = memory.read_u32(GuestAddress32{0x10100U}).value_or(0U);
+    check(get_motion_result.status == ExecutionStatus::Completed && get_motion_state.r[0] == 0U
+            && motion_handle != 0,
+        "AInputQueue_getEvent returns an opaque handle for motion events");
+    if (motion_handle == 0) return;
+    state = {};
+    state.r[0] = motion_handle;
+    auto [motion_count_state, motion_count_result] = invoke("AMotionEvent_getPointerCount", state);
+    check(motion_count_result.status == ExecutionStatus::Completed && motion_count_state.r[0] == 1U,
+        "AMotionEvent_getPointerCount reports the bounded pointer list");
+    state = {};
+    state.r[0] = motion_handle;
+    state.r[1] = 0;
+    auto [pointer_id_state, pointer_id_result] = invoke("AMotionEvent_getPointerId", state);
+    check(pointer_id_result.status == ExecutionStatus::Completed && pointer_id_state.r[0] == 4U,
+        "AMotionEvent_getPointerId marshals a pointer identifier");
+    state = {};
+    state.r[0] = motion_handle;
+    state.r[1] = 0;
+    auto [motion_x_state, motion_x_result] = invoke("AMotionEvent_getX", state);
+    check(motion_x_result.status == ExecutionStatus::Completed
+            && motion_x_state.r[0] == std::bit_cast<std::uint32_t>(12.5F),
+        "AMotionEvent_getX returns a float in the ARM32 core register");
+    state = {};
+    state.r[0] = motion_handle;
+    state.r[1] = 0;
+    auto [motion_y_state, motion_y_result] = invoke("AMotionEvent_getY", state);
+    check(motion_y_result.status == ExecutionStatus::Completed
+            && motion_y_state.r[0] == std::bit_cast<std::uint32_t>(-3.25F),
+        "AMotionEvent_getY preserves a signed guest float");
+    state = {};
+    state.r[0] = motion_handle;
+    auto [motion_history_state, motion_history_result] = invoke("AMotionEvent_getHistorySize", state);
+    check(motion_history_result.status == ExecutionStatus::Completed && motion_history_state.r[0] == 0U,
+        "AMotionEvent_getHistorySize reports no unsupported historical samples");
+    state = {};
+    state.r[0] = *queue;
+    state.r[1] = motion_handle;
+    state.r[2] = 0;
+    (void)invoke("AInputQueue_finishEvent", state);
+
+    state = {};
+    auto [no_looper_state, no_looper_result] = invoke("ALooper_forThread", state);
+    check(no_looper_result.status == ExecutionStatus::Completed && no_looper_state.r[0] == 0U,
+        "ALooper_forThread returns null before a looper is prepared");
+    state = {};
+    state.r[0] = 0;
+    auto [prepare_state, prepare_result] = invoke("ALooper_prepare", state);
+    const auto looper = prepare_state.r[0];
+    check(prepare_result.status == ExecutionStatus::Completed && looper != 0
+            && heap.allocation_size(GuestAddress32{looper}).has_value(),
+        "ALooper_prepare returns a guest-heap opaque runtime looper");
+    if (looper == 0) return;
+    state = {};
+    auto [for_thread_state, for_thread_result] = invoke("ALooper_forThread", state);
+    check(for_thread_result.status == ExecutionStatus::Completed && for_thread_state.r[0] == looper,
+        "ALooper_forThread returns the prepared runtime looper");
+
+    state = {};
+    state.r[0] = 0;
+    state.r[1] = 0x10200U;
+    state.r[2] = 0x10204U;
+    state.r[3] = 0x10208U;
+    auto [timeout_state, timeout_result] = invoke("ALooper_pollOnce", state);
+    check(timeout_result.status == ExecutionStatus::Completed
+            && timeout_state.r[0] == static_cast<std::uint32_t>(-3)
+            && memory.read_u32(GuestAddress32{0x10200U}).value_or(0U) == std::numeric_limits<std::uint32_t>::max()
+            && memory.read_u32(GuestAddress32{0x10204U}).value_or(1U) == 0U
+            && memory.read_u32(GuestAddress32{0x10208U}).value_or(1U) == 0U,
+        "ALooper_pollOnce performs a nonblocking timeout and clears optional outputs");
+    state = {};
+    state.r[0] = looper;
+    (void)invoke("ALooper_wake", state);
+    state = {};
+    state.r[0] = 0;
+    state.r[1] = 0x10200U;
+    state.r[2] = 0x10204U;
+    state.r[3] = 0x10208U;
+    auto [wake_state, wake_result] = invoke("ALooper_pollOnce", state);
+    check(wake_result.status == ExecutionStatus::Completed
+            && wake_state.r[0] == static_cast<std::uint32_t>(-1),
+        "ALooper_wake causes one ALOOPER_POLL_WAKE result");
+    state = {};
+    state.r[0] = looper;
+    (void)invoke("ALooper_acquire", state);
+    state = {};
+    state.r[0] = looper;
+    (void)invoke("ALooper_release", state);
+    state = {};
+    state.r[0] = looper;
+    (void)invoke("ALooper_wake", state);
+    state = {};
+    state.r[0] = 0;
+    state.r[1] = kReturnAddress;
+    state.r[2] = 0;
+    state.r[3] = 0;
+    auto [bad_poll_state, bad_poll_result] = invoke("ALooper_pollOnce", state);
+    check(bad_poll_result.status == ExecutionStatus::Completed
+            && bad_poll_state.r[0] == static_cast<std::uint32_t>(-4),
+        "ALooper_pollOnce rejects invalid output pointers and does not expose host memory");
+    state = {};
+    state.r[0] = 0;
+    state.r[1] = 0x10200U;
+    state.r[2] = 0x10204U;
+    state.r[3] = 0x10208U;
+    auto [wake_after_error_state, wake_after_error_result] = invoke("ALooper_pollOnce", state);
+    check(wake_after_error_result.status == ExecutionStatus::Completed
+            && wake_after_error_state.r[0] == static_cast<std::uint32_t>(-1),
+        "invalid poll outputs do not consume a pending looper wake");
+    state = {};
+    state.r[0] = looper;
+    state.r[1] = 7;
+    state.r[2] = 1;
+    state.r[3] = 1;
+    auto [add_fd_state, add_fd_result] = invoke("ALooper_addFd", state);
+    check(add_fd_result.status == ExecutionStatus::Completed
+            && add_fd_state.r[0] == std::numeric_limits<std::uint32_t>::max(),
+        "ALooper_addFd explicitly rejects unsupported host file-descriptor polling");
+}
+
 void test_synthetic_jni_java_vm_tables_and_handles() {
     using namespace retrobridge::runtime;
     GuestMemory memory(1024U * 1024U);
@@ -1758,8 +2037,8 @@ void test_capabilities_and_optional_dbt_placeholder() {
         "the registered-blob AAsset subset is reported available");
     check(retrobridge::runtime::current_capabilities().headless_native_window_buffers,
         "bounded headless native-window buffers are reported as a narrow capability");
-    check(!retrobridge::runtime::current_capabilities().android_input_queue_and_looper,
-        "Android input queue and ALooper remain explicitly unavailable");
+    check(retrobridge::runtime::current_capabilities().synthetic_android_input_queue_looper_subset,
+        "the synthetic host-injected AInputQueue/ALooper subset is reported as available");
     check(!retrobridge::runtime::current_capabilities().headless_gles_egl,
         "headless GLES/EGL remains explicitly unavailable");
     check(!retrobridge::runtime::current_capabilities().opensl_es_audio_thunks,
@@ -1785,6 +2064,7 @@ int main() {
     test_guest_bionic_libc_libm_and_pthread_thunks();
     test_guest_android_asset_thunks();
     test_headless_native_window_buffers_and_lifecycle();
+    test_synthetic_android_input_queue_and_looper();
     test_synthetic_jni_java_vm_tables_and_handles();
     test_a32_t32_execution_svc_and_trampolines();
     test_capabilities_and_optional_dbt_placeholder();

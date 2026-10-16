@@ -52,9 +52,9 @@ object CompatibilityReport {
             explanation = "Host-created headless surfaces provide separately mapped RGBA_8888 guest buffers (4 Mi pixels per surface, 16 MiB total), lock/unlock-and-post, geometry, and acquire/release thunks. Java Surface/ANativeWindow_fromSurface, synchronization fences, transforms, and device display integration are absent.",
         ),
         Capability(
-            name = "ALooper and Android input queue",
-            status = CapabilityStatus.NOT_IMPLEMENTED,
-            explanation = "There is no ALooper polling or AInputQueue/event translation; native-window rendering is headless only.",
+            name = "Synthetic AInputQueue and ALooper subset",
+            status = CapabilityStatus.PARTIAL,
+            explanation = "A host-injected bounded key/motion queue exposes event accessors and a nonblocking per-runtime ALooper prepare/wake/timeout subset. There is no Android system input source, thread-local looper, input-to-looper attachment, callback dispatch, or file-descriptor polling.",
         ),
         Capability(
             name = "Headless GLES/EGL",
