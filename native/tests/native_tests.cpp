@@ -1345,11 +1345,15 @@ void test_a32_t32_execution_svc_and_trampolines() {
             && double_result_bits == std::bit_cast<std::uint64_t>(42.0),
         "A32 VFP VADD.F64 updates the architectural D-register bank");
 
-    std::vector<std::byte> vfp_t32_program(8, std::byte{0});
-    put_u16(vfp_t32_program, 0, 0xee30U);
-    put_u16(vfp_t32_program, 2, 0x1a20U); // Thumb-2 vadd.f32 s2, s0, s1
-    put_u16(vfp_t32_program, 4, 0x2701U); // movs r7, #1
-    put_u16(vfp_t32_program, 6, 0xdf00U); // svc #0
+    std::vector<std::byte> vfp_t32_program(16, std::byte{0});
+    put_u16(vfp_t32_program, 0, 0xee00U);
+    put_u16(vfp_t32_program, 2, 0x0a10U); // Thumb-2 vmov s0, r0
+    put_u16(vfp_t32_program, 4, 0xee00U);
+    put_u16(vfp_t32_program, 6, 0x1a90U); // Thumb-2 vmov s1, r1
+    put_u16(vfp_t32_program, 8, 0xee30U);
+    put_u16(vfp_t32_program, 10, 0x1a20U); // Thumb-2 vadd.f32 s2, s0, s1
+    put_u16(vfp_t32_program, 12, 0x2701U); // movs r7, #1
+    put_u16(vfp_t32_program, 14, 0xdf00U); // svc #0
     check(memory.map_bytes(GuestAddress32{0x2400}, vfp_t32_program, vfp_t32_program.size(),
         GuestPermission::Read | GuestPermission::Execute), "T32 VFP test code maps RX");
     GuestCpuState32 vfp_t32_state{};
