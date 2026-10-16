@@ -47,9 +47,14 @@ object CompatibilityReport {
             explanation = "A synthetic manager and read/getBuffer/seek/length/close thunks work with caller-registered bounded immutable blobs and generation-checked handles. APK assets, Java AssetManager conversion, asset directories, and APK launch integration are not connected.",
         ),
         Capability(
-            name = "ANativeWindow and Android input",
+            name = "Headless ANativeWindow buffer subset",
+            status = CapabilityStatus.PARTIAL,
+            explanation = "Host-created headless surfaces provide separately mapped RGBA_8888 guest buffers (4 Mi pixels per surface, 16 MiB total), lock/unlock-and-post, geometry, and acquire/release thunks. Java Surface/ANativeWindow_fromSurface, synchronization fences, transforms, and device display integration are absent.",
+        ),
+        Capability(
+            name = "ALooper and Android input queue",
             status = CapabilityStatus.NOT_IMPLEMENTED,
-            explanation = "There is no guest native-window buffer bridge or Android input-queue/event translation.",
+            explanation = "There is no ALooper polling or AInputQueue/event translation; native-window rendering is headless only.",
         ),
         Capability(
             name = "Headless GLES/EGL",

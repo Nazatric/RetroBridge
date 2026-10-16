@@ -30,6 +30,10 @@ class CompatibilityReportTest {
             report.getValue("NDK AAssetManager/AAsset subset").status,
         )
         assertEquals(
+            CapabilityStatus.PARTIAL,
+            report.getValue("Headless ANativeWindow buffer subset").status,
+        )
+        assertEquals(
             CapabilityStatus.NOT_IMPLEMENTED,
             report.getValue("Execution of arbitrary guest APKs").status,
         )
@@ -41,7 +45,7 @@ class CompatibilityReportTest {
         val report = CompatibilityReport.capabilities.associateBy(Capability::name)
 
         listOf(
-            "ANativeWindow and Android input",
+            "ALooper and Android input queue",
             "Headless GLES/EGL",
             "OpenSL ES audio",
             "Guest IPC and Android framework virtualization",

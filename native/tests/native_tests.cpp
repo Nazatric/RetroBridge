@@ -8,6 +8,7 @@
 #include "retrobridge/guest_jni_bridge.h"
 #include "retrobridge/guest_bionic_thunks.h"
 #include "retrobridge/guest_android_asset_thunks.h"
+#include "retrobridge/guest_android_window_thunks.h"
 #include "retrobridge/handle_table.h"
 #include "retrobridge/runtime_capabilities.h"
 #include "arm32_syscall_dispatcher.h"
@@ -1245,6 +1246,158 @@ void test_guest_android_asset_thunks() {
         "closing an asset invalidates its generation-checked handle");
 }
 
+void test_headless_native_window_buffers_and_lifecycle() {
+    using namespace retrobridge::runtime;
+    constexpr std::uint32_t kReturnAddress = 0x8000U;
+    constexpr std::uint32_t kGuestData = 0x10000U;
+
+    GuestMemory memory(8U * 1024U * 1024U);
+    std::vector<std::byte> return_code(4, std::byte{0});
+    put_u32(return_code, 0, 0xef000000U);
+    check(memory.map_bytes(GuestAddress32{kReturnAddress}, return_code, return_code.size(),
+        GuestPermission::Read | GuestPermission::Execute), "native-window return sentinel maps RX");
+    check(memory.map_zeroed(GuestAddress32{kGuestData}, 0x2000U,
+        GuestPermission::Read | GuestPermission::Write), "native-window output structures map RW");
+    GuestHeap32 heap(memory);
+    check(heap.initialize(GuestAddress32{0x30000U}, 4U * 1024U * 1024U), "native-window guest heap initializes");
+
+    GuestTrampolineRegistry trampolines;
+    GuestAndroidWindowThunks windows(memory, heap, trampolines);
+    std::string diagnostic;
+    check(windows.install(&diagnostic), "bounded headless ANativeWindow thunk table installs");
+    check(windows.resolve_symbol("ANativeWindow_lock").has_value()
+            && windows.resolve_symbol("ANativeWindow_unlockAndPost").has_value()
+            && windows.resolve_symbol("ANativeWindow_setBuffersGeometry").has_value(),
+        "headless window bridge resolves buffer and geometry APIs");
+    check(!windows.create_headless_window(0, 4).has_value()
+            && !windows.create_headless_window(4, 4, 4).has_value(),
+        "headless window factory rejects empty dimensions and unsupported pixel formats");
+    const auto handle = windows.create_headless_window(4, 3, GuestAndroidWindowThunks::kRgba8888, &diagnostic);
+    check(handle.has_value() && *handle != 0 && heap.allocation_size(GuestAddress32{*handle}).has_value(),
+        "headless window is represented by a guest-heap opaque handle");
+    if (!handle.has_value()) return;
+
+    const auto svc = [](GuestCpuState32& state, std::uint32_t immediate, GuestMemory&) {
+        if (immediate == 0 && state.r[7] == 1) return GuestHookResult{GuestHookAction::Stop, "window thunk return"};
+        return GuestHookResult{GuestHookAction::Fault, "unexpected window thunk SVC"};
+    };
+    Arm32Interpreter interpreter(memory, trampolines, svc);
+    const auto invoke = [&](std::string_view name, GuestCpuState32 state) {
+        const auto function = windows.resolve_symbol(name);
+        if (!function.has_value()) {
+            check(false, "native-window test symbol resolves to a guest trampoline");
+            return std::pair{state, ExecutionResult{}};
+        }
+        state.r[7] = 1;
+        state.r[14] = kReturnAddress;
+        auto result = interpreter.run(state, GuestAddress32{*function}, 16);
+        check(result.status == ExecutionStatus::Completed, "native-window thunk returns through guest execution");
+        return std::pair{state, result};
+    };
+
+    GuestCpuState32 state{};
+    state.r[0] = *handle;
+    auto [width_state, width_result] = invoke("ANativeWindow_getWidth", state);
+    check(width_result.status == ExecutionStatus::Completed && width_state.r[0] == 4U,
+        "ANativeWindow_getWidth reports the current offscreen width");
+    state = {};
+    state.r[0] = *handle;
+    auto [height_state, height_result] = invoke("ANativeWindow_getHeight", state);
+    check(height_result.status == ExecutionStatus::Completed && height_state.r[0] == 3U,
+        "ANativeWindow_getHeight reports the current offscreen height");
+
+    state = {};
+    state.r[0] = *handle;
+    state.r[1] = 2;
+    state.r[2] = 2;
+    state.r[3] = GuestAndroidWindowThunks::kRgba8888;
+    auto [geometry_state, geometry_result] = invoke("ANativeWindow_setBuffersGeometry", state);
+    check(geometry_result.status == ExecutionStatus::Completed && geometry_state.r[0] == 0,
+        "ANativeWindow_setBuffersGeometry reallocates a bounded RGBA buffer");
+    const auto pixels = windows.pixel_buffer(*handle);
+    check(pixels.has_value() && memory.is_accessible(*pixels, 16U, GuestPermission::Write)
+            && !heap.allocation_size(*pixels).has_value() && !heap.free(*pixels),
+        "headless surface exposes a bounded guest-mapped pixel buffer outside the general heap");
+    if (!pixels.has_value()) return;
+
+    state = {};
+    state.r[0] = *handle;
+    state.r[1] = 0x10100U; // ANativeWindow_Buffer, 24 bytes in the 32-bit ABI
+    state.r[2] = 0x10200U; // ARect dirty bounds
+    auto [lock_state, lock_result] = invoke("ANativeWindow_lock", state);
+    check(lock_result.status == ExecutionStatus::Completed && lock_state.r[0] == 0,
+        "ANativeWindow_lock returns a 32-bit guest buffer descriptor");
+    check(memory.read_u32(GuestAddress32{0x10100U}).value_or(0U) == 2U
+            && memory.read_u32(GuestAddress32{0x10104U}).value_or(0U) == 2U
+            && memory.read_u32(GuestAddress32{0x10108U}).value_or(0U) == 2U
+            && memory.read_u32(GuestAddress32{0x1010cU}).value_or(0U) == GuestAndroidWindowThunks::kRgba8888
+            && memory.read_u32(GuestAddress32{0x10110U}).value_or(0U) == pixels->value(),
+        "ANativeWindow_Buffer fields contain guest width, height, stride, format, and bits pointer");
+    check(memory.read_u32(GuestAddress32{0x10208U}).value_or(0U) == 2U
+            && memory.read_u32(GuestAddress32{0x1020cU}).value_or(0U) == 2U,
+        "ANativeWindow_lock writes the dirty rectangle in guest memory");
+
+    state = {};
+    state.r[0] = *handle;
+    state.r[1] = 0x10300U;
+    auto [double_lock_state, double_lock_result] = invoke("ANativeWindow_lock", state);
+    check(double_lock_result.status == ExecutionStatus::Completed
+            && double_lock_state.r[0] == static_cast<std::uint32_t>(-EBUSY),
+        "headless surface rejects a second lock while the buffer is held");
+
+    const std::array<std::byte, 4> green_pixel{std::byte{0x00}, std::byte{0xff}, std::byte{0x00}, std::byte{0xff}};
+    check(memory.write(*pixels, green_pixel), "guest can update its locked RGBA pixel buffer");
+    state = {};
+    state.r[0] = *handle;
+    auto [post_state, post_result] = invoke("ANativeWindow_unlockAndPost", state);
+    std::array<std::byte, 4> posted_pixel{};
+    check(post_result.status == ExecutionStatus::Completed && post_state.r[0] == 0
+            && memory.read(*pixels, posted_pixel) && posted_pixel == green_pixel
+            && windows.posted_frame_count(*handle).value_or(0) == 1,
+        "ANativeWindow_unlockAndPost completes a headless frame without copying host pointers");
+
+    state = {};
+    state.r[0] = *handle;
+    state.r[1] = kReturnAddress; // RX-only output memory is not an ANativeWindow_Buffer
+    state.r[2] = 0;
+    auto [bad_lock_state, bad_lock_result] = invoke("ANativeWindow_lock", state);
+    check(bad_lock_result.status == ExecutionStatus::Completed
+            && bad_lock_state.r[0] == static_cast<std::uint32_t>(-EINVAL),
+        "ANativeWindow_lock rejects non-writable guest descriptors");
+
+    state = {};
+    state.r[0] = *handle;
+    state.r[1] = 4097;
+    state.r[2] = 1024;
+    state.r[3] = GuestAndroidWindowThunks::kRgba8888;
+    auto [oversize_state, oversize_result] = invoke("ANativeWindow_setBuffersGeometry", state);
+    check(oversize_result.status == ExecutionStatus::Completed
+            && oversize_state.r[0] == static_cast<std::uint32_t>(-EINVAL),
+        "headless surface pixel quota rejects excessive geometry");
+
+    state = {};
+    state.r[0] = *handle;
+    (void)invoke("ANativeWindow_acquire", state);
+    state = {};
+    state.r[0] = *handle;
+    (void)invoke("ANativeWindow_release", state);
+    state = {};
+    state.r[0] = *handle;
+    auto [still_open_state, still_open_result] = invoke("ANativeWindow_getWidth", state);
+    check(still_open_result.status == ExecutionStatus::Completed && still_open_state.r[0] == 2U,
+        "ANativeWindow acquire/release keeps a referenced window alive");
+    state = {};
+    state.r[0] = *handle;
+    (void)invoke("ANativeWindow_release", state);
+    check(!windows.pixel_buffer(*handle).has_value() && !memory.is_mapped(*pixels),
+        "final ANativeWindow release invalidates the handle and unmaps its pixel buffer");
+    state = {};
+    state.r[0] = *handle;
+    auto [stale_state, stale_result] = invoke("ANativeWindow_getWidth", state);
+    check(stale_result.status == ExecutionStatus::Completed && stale_state.r[0] == 0U,
+        "released native-window handles cannot access a later surface");
+}
+
 void test_synthetic_jni_java_vm_tables_and_handles() {
     using namespace retrobridge::runtime;
     GuestMemory memory(1024U * 1024U);
@@ -1603,8 +1756,10 @@ void test_capabilities_and_optional_dbt_placeholder() {
         "partial JNI support is not reported as a complete virtual Java runtime");
     check(retrobridge::runtime::current_capabilities().android_asset_manager_thunks,
         "the registered-blob AAsset subset is reported available");
-    check(!retrobridge::runtime::current_capabilities().android_native_window_input,
-        "native window and input remain explicitly unavailable");
+    check(retrobridge::runtime::current_capabilities().headless_native_window_buffers,
+        "bounded headless native-window buffers are reported as a narrow capability");
+    check(!retrobridge::runtime::current_capabilities().android_input_queue_and_looper,
+        "Android input queue and ALooper remain explicitly unavailable");
     check(!retrobridge::runtime::current_capabilities().headless_gles_egl,
         "headless GLES/EGL remains explicitly unavailable");
     check(!retrobridge::runtime::current_capabilities().opensl_es_audio_thunks,
@@ -1629,6 +1784,7 @@ int main() {
     test_arm32_syscall_dispatcher_and_guest_vfs();
     test_guest_bionic_libc_libm_and_pthread_thunks();
     test_guest_android_asset_thunks();
+    test_headless_native_window_buffers_and_lifecycle();
     test_synthetic_jni_java_vm_tables_and_handles();
     test_a32_t32_execution_svc_and_trampolines();
     test_capabilities_and_optional_dbt_placeholder();

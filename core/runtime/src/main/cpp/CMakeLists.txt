@@ -9,6 +9,7 @@ set(RETROBRIDGE_RUNTIME_SOURCES
     src/guest_jni_bridge.cpp
     src/guest_bionic_thunks.cpp
     src/guest_android_asset_thunks.cpp
+    src/guest_android_window_thunks.cpp
     src/elf32_loader.cpp
     ../../../../../native/vfs/native_vfs_path.cpp
     ../../../../../native/vfs/native_vfs.cpp
