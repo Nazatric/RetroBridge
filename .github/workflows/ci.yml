@@ -20,10 +20,10 @@ jobs:
     timeout-minutes: 40
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -62,7 +62,7 @@ jobs:
             native/build/host
             native/build/arm32-fixtures
             core/runtime/.cxx
-          key: ${{ runner.os }}-retrobridge-cmake-${{ hashFiles('native/CMakeLists.txt', 'native/**/*.cpp', 'core/runtime/src/main/cpp/**') }}
+          key: ${{ runner.os }}-retrobridge-cmake-${{ hashFiles('native/CMakeLists.txt', 'native/**/*.cpp', 'native/**/*.c', 'core/runtime/src/main/cpp/**') }}
           restore-keys: |
             ${{ runner.os }}-retrobridge-cmake-
 
@@ -92,7 +92,7 @@ jobs:
             -o native/build/arm32-fixtures/guest_arm32
           "$CC" -fPIC -shared \
             -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables \
-            -Wl,-soname,libretrobridge_fixture.so -Wl,--build-id=none \
+            -Wl,-soname,libretrobridge_fixture.so -Wl,--build-id=none -Wl,--no-as-needed \
             native/fixtures/arm32_shared_fixture.c \
             -o native/build/arm32-fixtures/libretrobridge_fixture.so
           file native/build/arm32-fixtures/* | tee diagnostics/arm32-fixtures.log
@@ -120,6 +120,22 @@ jobs:
             :core:manager:test \
             :core:fs:test \
             :core:services:test 2>&1 | tee diagnostics/gradle.log
+
+      - name: Surface failure diagnostic tails
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          for log in diagnostics/gradle.log diagnostics/ctest.log diagnostics/native-build.log diagnostics/arm32-fixtures.log; do
+            if [[ -s "$log" ]]; then
+              echo "### $log (last 100 lines)" >> "$GITHUB_STEP_SUMMARY"
+              echo '```text' >> "$GITHUB_STEP_SUMMARY"
+              tail -n 100 "$log" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+              message="$(tail -n 100 "$log" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e 's/\n/%0A/g' -e 's/::/%3A%3A/g')"
+              echo "::error title=RetroBridge diagnostic ($log)::$message"
+            fi
+          done
 
       - name: Upload APKs, ELF fixtures, test binaries, and diagnostics
         if: always()
