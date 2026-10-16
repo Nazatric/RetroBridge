@@ -22,6 +22,16 @@ target_compile_options(retrobridge_arm32_fixture_runner PRIVATE -Wall -Wextra -W
 
 add_test(NAME native_core COMMAND retrobridge_native_tests)
 
+if(RETROBRIDGE_ARM32_VFP_EXECUTABLE)
+    if(NOT EXISTS "${RETROBRIDGE_ARM32_VFP_EXECUTABLE}")
+        message(FATAL_ERROR "RETROBRIDGE_ARM32_VFP_EXECUTABLE does not exist: ${RETROBRIDGE_ARM32_VFP_EXECUTABLE}")
+    endif()
+    add_test(
+        NAME arm32_vfp_executable_execution
+        COMMAND retrobridge_arm32_fixture_runner "${RETROBRIDGE_ARM32_VFP_EXECUTABLE}"
+    )
+endif()
+
 if(RETROBRIDGE_ARM32_EXECUTABLE)
     if(NOT EXISTS "${RETROBRIDGE_ARM32_EXECUTABLE}")
         message(FATAL_ERROR "RETROBRIDGE_ARM32_EXECUTABLE does not exist: ${RETROBRIDGE_ARM32_EXECUTABLE}")

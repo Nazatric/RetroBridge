@@ -10,7 +10,7 @@ RetroBridge is an experimental, rootless-first research project for inspecting a
 - A bounded A32/T32 interpreter supports an explicit instruction subset, SVC callbacks, and registered guest-address trampolines. CI executes both hand-authored interpreter tests and a cross-compiled ARM32 ELF fixture.
 - A bounded guest heap, app-private POSIX-backed VFS/path translator, and ARM32 EABI syscall subset (file I/O/stat/directory basics, clocks, anonymous mappings, `brk`, and process identity/exit) are tested. A separate partial Bionic/libc/libm/pthread thunk table covers basic allocation, memory/string, math, file-descriptor, mutex, and single-synthetic-thread TLS calls; unsupported thread creation returns `EAGAIN`. Synthetic 32-bit JNI/JavaVM tables and a bounded string/array/reference/`RegisterNatives` subset are also tested. These components are not connected to APK launch: unsupported syscalls fail with `ENOSYS`, unsupported JNI calls set explicit exceptions, and VFS paths have no host-root fallback.
 - Host APK UI and compatibility report: prototype implementation.
-- Complete ARMv7/VFP/NEON execution, full Bionic/libc/libm/pthread coverage and scheduling, broad JNI/system thunks, dependency loading, and guest framework services: **not implemented**. The current thunk table is an explicit subset, not general Android ABI compatibility.
+- Complete ARMv7 execution, broad VFP/NEON coverage, full Bionic/libc/libm/pthread coverage and scheduling, broad JNI/system thunks, dependency loading, and guest framework services: **not implemented**. The interpreter now covers a small scalar VFP transfer/arithmetic subset; the current thunk table is also an explicit subset, not general Android ABI compatibility.
 - Launch and Stop remain intentionally unavailable. The guest runtime service rejects start requests; native execution is not wired to imported APKs and is not a security boundary.
 - No root, privileged system integration, SDK/NDK download, or full-OS virtual machine is required by the source tree.
 
@@ -28,6 +28,6 @@ See [the compatibility matrix](docs/compatibility-matrix.md), [architecture note
 
 ## Build and verify
 
-The supported verification path is GitHub Actions (`CI`). It uses the runner's Android SDK/NDK, builds the `arm64-v8a` management APK and native library, cross-compiles small `armeabi-v7a` ELF fixtures, and runs Gradle tests plus host-side CTest. CTest validates metadata, guest heap/VFS/syscall behavior, and loads/relocates/executes the minimal ARM32 executable with the bounded interpreter. APKs, fixture binaries, test tools, and diagnostics are uploaded as workflow artifacts.
+The supported verification path is GitHub Actions (`CI`). It uses the runner's Android SDK/NDK, builds the `arm64-v8a` management APK and native library, cross-compiles small `armeabi-v7a` ELF fixtures, and runs Gradle tests plus host-side CTest. CTest validates metadata, guest heap/VFS/syscall behavior, and loads/relocates/executes NDK-built ARM32 integer and scalar-VFP fixtures with the bounded interpreter. APKs, fixture binaries, test tools, and diagnostics are uploaded as workflow artifacts.
 
 No Android SDK, NDK, emulator, or heavyweight toolchain is downloaded into the project workspace. A local Gradle/CMake build is optional for contributors, but is not a claim of on-device guest compatibility.

@@ -1299,6 +1299,71 @@ void test_a32_t32_execution_svc_and_trampolines() {
     check(wide_thumb_result.status == ExecutionStatus::Completed && wide_thumb_state.r[0] == 0x00010028U,
         "T32 32-bit MOVW/MOVT instructions decode and execute");
 
+    std::vector<std::byte> vfp_a32_program(20, std::byte{0});
+    put_u32(vfp_a32_program, 0, 0xee000a10U);  // vmov s0, r0
+    put_u32(vfp_a32_program, 4, 0xee001a90U);  // vmov s1, r1
+    put_u32(vfp_a32_program, 8, 0xee301a20U);  // vadd.f32 s2, s0, s1
+    put_u32(vfp_a32_program, 12, 0xe3a07001U); // mov r7, #1
+    put_u32(vfp_a32_program, 16, 0xef000000U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x2200}, vfp_a32_program, vfp_a32_program.size(),
+        GuestPermission::Read | GuestPermission::Execute), "A32 VFP test code maps RX");
+    GuestCpuState32 vfp_a32_state{};
+    vfp_a32_state.r[0] = std::bit_cast<std::uint32_t>(40.0F);
+    vfp_a32_state.r[1] = std::bit_cast<std::uint32_t>(2.0F);
+    const auto vfp_a32_result = interpreter.run(vfp_a32_state, GuestAddress32{0x2200}, 32);
+    const auto vfp_single_result = std::to_integer<std::uint32_t>(vfp_a32_state.q[0][8])
+        | (std::to_integer<std::uint32_t>(vfp_a32_state.q[0][9]) << 8U)
+        | (std::to_integer<std::uint32_t>(vfp_a32_state.q[0][10]) << 16U)
+        | (std::to_integer<std::uint32_t>(vfp_a32_state.q[0][11]) << 24U);
+    check(vfp_a32_result.status == ExecutionStatus::Completed
+            && vfp_single_result == std::bit_cast<std::uint32_t>(42.0F),
+        "A32 VFP VMOV and VADD.F32 update the architectural S-register bank");
+
+    std::vector<std::byte> vfp_double_program(8, std::byte{0});
+    put_u32(vfp_double_program, 0, 0xee302b01U); // vadd.f64 d2, d0, d1
+    put_u32(vfp_double_program, 4, 0xef000000U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x2300}, vfp_double_program, vfp_double_program.size(),
+        GuestPermission::Read | GuestPermission::Execute), "A32 VFP double-precision test code maps RX");
+    GuestCpuState32 vfp_double_state{};
+    const auto forty_double = std::bit_cast<std::uint64_t>(40.0);
+    const auto two_double = std::bit_cast<std::uint64_t>(2.0);
+    for (unsigned byte = 0; byte < 8; ++byte) {
+        vfp_double_state.q[0][byte] = static_cast<std::byte>((forty_double >> (byte * 8U)) & 0xffU);
+        vfp_double_state.q[0][8U + byte] = static_cast<std::byte>((two_double >> (byte * 8U)) & 0xffU);
+    }
+    vfp_double_state.r[7] = 1;
+    const auto vfp_double_result = interpreter.run(vfp_double_state, GuestAddress32{0x2300}, 16);
+    const auto double_result_bits = static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(vfp_double_state.q[1][0]))
+        | (static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(vfp_double_state.q[1][1])) << 8U)
+        | (static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(vfp_double_state.q[1][2])) << 16U)
+        | (static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(vfp_double_state.q[1][3])) << 24U)
+        | (static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(vfp_double_state.q[1][4])) << 32U)
+        | (static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(vfp_double_state.q[1][5])) << 40U)
+        | (static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(vfp_double_state.q[1][6])) << 48U)
+        | (static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(vfp_double_state.q[1][7])) << 56U);
+    check(vfp_double_result.status == ExecutionStatus::Completed
+            && double_result_bits == std::bit_cast<std::uint64_t>(42.0),
+        "A32 VFP VADD.F64 updates the architectural D-register bank");
+
+    std::vector<std::byte> vfp_t32_program(8, std::byte{0});
+    put_u16(vfp_t32_program, 0, 0xee30U);
+    put_u16(vfp_t32_program, 2, 0x1a20U); // Thumb-2 vadd.f32 s2, s0, s1
+    put_u16(vfp_t32_program, 4, 0x2701U); // movs r7, #1
+    put_u16(vfp_t32_program, 6, 0xdf00U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x2400}, vfp_t32_program, vfp_t32_program.size(),
+        GuestPermission::Read | GuestPermission::Execute), "T32 VFP test code maps RX");
+    GuestCpuState32 vfp_t32_state{};
+    vfp_t32_state.r[0] = std::bit_cast<std::uint32_t>(40.0F);
+    vfp_t32_state.r[1] = std::bit_cast<std::uint32_t>(2.0F);
+    const auto vfp_t32_result = interpreter.run(vfp_t32_state, GuestAddress32{0x2401}, 16);
+    const auto thumb_single_result = std::to_integer<std::uint32_t>(vfp_t32_state.q[0][8])
+        | (std::to_integer<std::uint32_t>(vfp_t32_state.q[0][9]) << 8U)
+        | (std::to_integer<std::uint32_t>(vfp_t32_state.q[0][10]) << 16U)
+        | (std::to_integer<std::uint32_t>(vfp_t32_state.q[0][11]) << 24U);
+    check(vfp_t32_result.status == ExecutionStatus::Completed
+            && thumb_single_result == std::bit_cast<std::uint32_t>(42.0F),
+        "T32 VFP scalar arithmetic dispatches through the same checked S-register state");
+
     std::vector<std::byte> caller_program(16, std::byte{0});
     put_u32(caller_program, 0, 0xe3a00009U);  // mov r0, #9
     put_u32(caller_program, 4, 0xeb000001U);  // bl 0x3010

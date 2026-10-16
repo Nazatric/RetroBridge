@@ -207,6 +207,107 @@ void branch_exchange(GuestCpuState32& state, std::uint32_t target) noexcept {
     return memory.write_u32(GuestAddress32{address}, value);
 }
 
+[[nodiscard]] std::uint32_t read_vfp_single(const GuestCpuState32& state, unsigned index) noexcept {
+    const auto& q = state.q[index / 4U];
+    const auto offset = (index % 4U) * 4U;
+    std::uint32_t value = 0;
+    for (unsigned byte = 0; byte < 4; ++byte) {
+        value |= static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(q[offset + byte])) << (byte * 8U);
+    }
+    return value;
+}
+
+void write_vfp_single(GuestCpuState32& state, unsigned index, std::uint32_t value) noexcept {
+    auto& q = state.q[index / 4U];
+    const auto offset = (index % 4U) * 4U;
+    for (unsigned byte = 0; byte < 4; ++byte) {
+        q[offset + byte] = static_cast<std::byte>((value >> (byte * 8U)) & 0xffU);
+    }
+}
+
+[[nodiscard]] std::uint64_t read_vfp_double(const GuestCpuState32& state, unsigned index) noexcept {
+    const auto& q = state.q[index / 2U];
+    const auto offset = (index % 2U) * 8U;
+    std::uint64_t value = 0;
+    for (unsigned byte = 0; byte < 8; ++byte) {
+        value |= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(q[offset + byte])) << (byte * 8U);
+    }
+    return value;
+}
+
+void write_vfp_double(GuestCpuState32& state, unsigned index, std::uint64_t value) noexcept {
+    auto& q = state.q[index / 2U];
+    const auto offset = (index % 2U) * 8U;
+    for (unsigned byte = 0; byte < 8; ++byte) {
+        q[offset + byte] = static_cast<std::byte>((value >> (byte * 8U)) & 0xffU);
+    }
+}
+
+[[nodiscard]] std::optional<StepResult> execute_vfp_data(
+    GuestCpuState32& state,
+    std::uint32_t instruction) {
+    constexpr std::uint32_t kVfpEncodingMask = 0x0f000f10U;
+    const auto encoded = instruction & kVfpEncodingMask;
+
+    // VMOV between an ARM core register and an S register (VFP coprocessor 10).
+    if (encoded == 0x0e000a10U) {
+        const auto core_register = (instruction >> 12U) & 0xfU;
+        const auto single_register = (((instruction >> 16U) & 0xfU) << 1U) | ((instruction >> 7U) & 1U);
+        if (core_register == 15U) return fault("VFP VMOV using the ARM PC register is unpredictable");
+        if ((instruction & (1U << 20U)) == 0) write_vfp_single(state, single_register, state.r[core_register]);
+        else state.r[core_register] = read_vfp_single(state, single_register);
+        return StepResult{};
+    }
+
+    const bool single_precision = encoded == 0x0e000a00U;
+    const bool double_precision = encoded == 0x0e000b00U;
+    if (!single_precision && !double_precision) return std::nullopt;
+
+    const auto operation = (instruction >> 20U) & 0xfU;
+    const auto modifier = (instruction >> 6U) & 3U;
+    enum class Arithmetic { Add, Subtract, Multiply, Divide };
+    Arithmetic arithmetic{};
+    if (operation == 3U && modifier == 0U) arithmetic = Arithmetic::Add;
+    else if (operation == 3U && modifier == 1U) arithmetic = Arithmetic::Subtract;
+    else if (operation == 2U && modifier == 0U) arithmetic = Arithmetic::Multiply;
+    else if (operation == 8U && modifier == 0U) arithmetic = Arithmetic::Divide;
+    else return fault("unsupported VFP scalar arithmetic opcode");
+
+    const auto vd = (instruction >> 12U) & 0xfU;
+    const auto vn = (instruction >> 16U) & 0xfU;
+    const auto vm = instruction & 0xfU;
+    if (single_precision) {
+        const auto destination = (vd << 1U) | ((instruction >> 22U) & 1U);
+        const auto left_register = (vn << 1U) | ((instruction >> 7U) & 1U);
+        const auto right_register = (vm << 1U) | ((instruction >> 5U) & 1U);
+        const auto left = std::bit_cast<float>(read_vfp_single(state, left_register));
+        const auto right = std::bit_cast<float>(read_vfp_single(state, right_register));
+        float result = 0.0F;
+        switch (arithmetic) {
+            case Arithmetic::Add: result = left + right; break;
+            case Arithmetic::Subtract: result = left - right; break;
+            case Arithmetic::Multiply: result = left * right; break;
+            case Arithmetic::Divide: result = left / right; break;
+        }
+        write_vfp_single(state, destination, std::bit_cast<std::uint32_t>(result));
+    } else {
+        const auto destination = (((instruction >> 22U) & 1U) << 4U) | vd;
+        const auto left_register = (((instruction >> 7U) & 1U) << 4U) | vn;
+        const auto right_register = (((instruction >> 5U) & 1U) << 4U) | vm;
+        const auto left = std::bit_cast<double>(read_vfp_double(state, left_register));
+        const auto right = std::bit_cast<double>(read_vfp_double(state, right_register));
+        double result = 0.0;
+        switch (arithmetic) {
+            case Arithmetic::Add: result = left + right; break;
+            case Arithmetic::Subtract: result = left - right; break;
+            case Arithmetic::Multiply: result = left * right; break;
+            case Arithmetic::Divide: result = left / right; break;
+        }
+        write_vfp_double(state, destination, std::bit_cast<std::uint64_t>(result));
+    }
+    return StepResult{};
+}
+
 [[nodiscard]] StepResult execute_svc(
     GuestCpuState32& state,
     GuestMemory& memory,
@@ -225,6 +326,7 @@ void branch_exchange(GuestCpuState32& state, std::uint32_t target) noexcept {
     std::uint32_t instruction) {
     const auto condition = instruction >> 28U;
     if (condition != 0xfU && !condition_passed(state.cpsr, condition)) return {};
+    if (const auto vfp_result = execute_vfp_data(state, instruction); vfp_result.has_value()) return *vfp_result;
 
     if ((instruction & 0x0ffffff0U) == 0x012fff10U
         || (instruction & 0x0ffffff0U) == 0x012fff30U) {
@@ -733,6 +835,9 @@ void branch_exchange(GuestCpuState32& state, std::uint32_t target) noexcept {
     std::uint32_t pc,
     std::uint16_t first,
     std::uint16_t second) {
+    const auto combined_instruction = (static_cast<std::uint32_t>(first) << 16U) | second;
+    if (const auto vfp_result = execute_vfp_data(state, combined_instruction); vfp_result.has_value()) return *vfp_result;
+
     if (is_t32_movw(first, second, false) || is_t32_movw(first, second, true)) {
         const bool movt = is_t32_movw(first, second, true);
         const auto rd = (second >> 8U) & 0xfU;

@@ -11,4 +11,4 @@ The C++ library is platform-neutral so guest-address, memory, ELF, lifecycle, an
 - `handle_table.h`: generation-checked guest handle map to opaque 64-bit tokens; not a JNI implementation.
 - `runtime_capabilities.h`: capability snapshot keeps instruction execution distinct from complete guest-app compatibility.
 
-The host CMake project is verification-only. It cross-runs an ARM32 fixture with the host interpreter, but this is not evidence that arbitrary ARM32 Android applications run. The Android module builds the native sources for `arm64-v8a`; it currently exports no guest execution or JNI API, and the guest service rejects start requests.
+The host CMake project is verification-only. It cross-runs ARM32 integer and scalar-VFP fixtures with the host interpreter, but this is not evidence that arbitrary ARM32 Android applications run. The Android module builds the native sources for `arm64-v8a`; it currently exports no guest execution or JNI API, and the guest service rejects start requests.

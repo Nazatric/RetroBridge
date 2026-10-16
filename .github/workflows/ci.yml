@@ -95,7 +95,14 @@ jobs:
             -Wl,-soname,libretrobridge_fixture.so -Wl,--build-id=none -Wl,--no-as-needed \
             native/fixtures/arm32_shared_fixture.c \
             -o native/build/arm32-fixtures/libretrobridge_fixture.so
+          "$CC" -marm -mfpu=vfpv3-d16 -mfloat-abi=softfp -fPIE -pie -nostdlib \
+            -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables \
+            -Wl,-e,_start -Wl,--build-id=none \
+            native/fixtures/arm32_vfp_guest.S \
+            -o native/build/arm32-fixtures/guest_arm32_vfp
           file native/build/arm32-fixtures/* | tee diagnostics/arm32-fixtures.log
+          "$NDK_BIN/llvm-objdump" -d native/build/arm32-fixtures/guest_arm32_vfp \
+            | tee diagnostics/arm32-vfp-disassembly.log
 
       - name: Configure and build native host verification
         shell: bash
@@ -104,6 +111,7 @@ jobs:
           cmake -S native -B native/build/host \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DRETROBRIDGE_ARM32_EXECUTABLE="$GITHUB_WORKSPACE/native/build/arm32-fixtures/guest_arm32" \
+            -DRETROBRIDGE_ARM32_VFP_EXECUTABLE="$GITHUB_WORKSPACE/native/build/arm32-fixtures/guest_arm32_vfp" \
             -DRETROBRIDGE_ARM32_SHARED_LIBRARY="$GITHUB_WORKSPACE/native/build/arm32-fixtures/libretrobridge_fixture.so"
           cmake --build native/build/host --parallel 2 2>&1 | tee diagnostics/native-build.log
           ctest --test-dir native/build/host --output-on-failure 2>&1 | tee diagnostics/ctest.log
@@ -126,7 +134,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for log in diagnostics/gradle.log diagnostics/ctest.log diagnostics/native-build.log diagnostics/arm32-fixtures.log; do
+          for log in diagnostics/gradle.log diagnostics/ctest.log diagnostics/native-build.log diagnostics/arm32-fixtures.log diagnostics/arm32-vfp-disassembly.log; do
             if [[ -s "$log" ]]; then
               echo "### $log (last 100 lines)" >> "$GITHUB_STEP_SUMMARY"
               echo '```text' >> "$GITHUB_STEP_SUMMARY"
