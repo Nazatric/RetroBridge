@@ -7,6 +7,7 @@
 #include "retrobridge/guest_heap.h"
 #include "retrobridge/guest_jni_bridge.h"
 #include "retrobridge/guest_bionic_thunks.h"
+#include "retrobridge/guest_android_asset_thunks.h"
 #include "retrobridge/handle_table.h"
 #include "retrobridge/runtime_capabilities.h"
 #include "arm32_syscall_dispatcher.h"
@@ -1066,6 +1067,184 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
     check(!filesystem_error, "Bionic thunk VFS test root is cleaned up");
 }
 
+void test_guest_android_asset_thunks() {
+    using namespace retrobridge::runtime;
+    constexpr std::uint32_t kReturnAddress = 0x8000U;
+    constexpr std::uint32_t kGuestData = 0x10000U;
+    constexpr std::uint32_t kGuestStack = 0x20000U;
+
+    GuestMemory memory(1024U * 1024U);
+    std::vector<std::byte> return_code(4, std::byte{0});
+    put_u32(return_code, 0, 0xef000000U); // svc #0, used as the thunk return sentinel
+    check(memory.map_bytes(GuestAddress32{kReturnAddress}, return_code, return_code.size(),
+        GuestPermission::Read | GuestPermission::Execute), "asset thunk return sentinel maps RX");
+    check(memory.map_zeroed(GuestAddress32{kGuestData}, 0x2000U,
+        GuestPermission::Read | GuestPermission::Write), "asset test strings and output buffers map RW");
+    check(memory.map_zeroed(GuestAddress32{kGuestStack}, 0x1000U,
+        GuestPermission::Read | GuestPermission::Write), "asset thunk stack arguments map RW");
+    GuestHeap32 heap(memory);
+    check(heap.initialize(GuestAddress32{0x30000U}, 0x10000U), "asset thunk guest heap initializes");
+
+    GuestTrampolineRegistry trampolines;
+    GuestAndroidAssetThunks assets(memory, heap, trampolines);
+    const std::array<std::byte, 4> source{
+        std::byte{'A'}, std::byte{'B'}, std::byte{'C'}, std::byte{'D'},
+    };
+    std::string diagnostic;
+    check(!assets.register_asset("../outside.bin", source, &diagnostic)
+            && !diagnostic.empty(),
+        "asset catalog rejects traversal names");
+    check(assets.register_asset("textures/hero.bin", source, &diagnostic),
+        "bounded immutable asset blob registers");
+    check(!assets.register_asset("textures/hero.bin", source, &diagnostic),
+        "asset catalog rejects duplicate paths");
+    check(assets.install(&diagnostic), "synthetic AAssetManager/AAsset thunk table installs");
+    check(assets.installed() && assets.asset_manager_handle() != 0
+            && assets.registered_asset_count() == 1,
+        "asset bridge exposes an opaque manager handle and a bounded catalog");
+    check(assets.resolve_symbol("AAssetManager_open").has_value()
+            && assets.resolve_symbol("AAsset_read").has_value()
+            && assets.resolve_symbol("AAsset_getBuffer").has_value()
+            && assets.resolve_symbol("AAsset_seek64").has_value()
+            && assets.resolve_symbol("AAsset_getLength64").has_value(),
+        "asset bridge resolves the supported NDK function subset");
+
+    const auto svc = [](GuestCpuState32& state, std::uint32_t immediate, GuestMemory&) {
+        if (immediate == 0 && state.r[7] == 1) return GuestHookResult{GuestHookAction::Stop, "asset thunk return"};
+        return GuestHookResult{GuestHookAction::Fault, "unexpected asset thunk SVC"};
+    };
+    Arm32Interpreter interpreter(memory, trampolines, svc);
+    const auto invoke = [&](std::string_view name, GuestCpuState32 state) {
+        const auto function = assets.resolve_symbol(name);
+        if (!function.has_value()) {
+            check(false, "asset test symbol resolves to a guest trampoline");
+            return std::pair{state, ExecutionResult{}};
+        }
+        state.r[7] = 1;
+        state.r[13] = kGuestStack;
+        state.r[14] = kReturnAddress;
+        auto result = interpreter.run(state, GuestAddress32{*function}, 16);
+        check(result.status == ExecutionStatus::Completed, "asset thunk returns through guest execution");
+        return std::pair{state, result};
+    };
+    const auto write_guest_string = [&](std::uint32_t address, std::string_view text) {
+        std::vector<std::byte> bytes(text.size() + 1U, std::byte{0});
+        for (std::size_t index = 0; index < text.size(); ++index) {
+            bytes[index] = static_cast<std::byte>(static_cast<unsigned char>(text[index]));
+        }
+        return memory.write(GuestAddress32{address}, bytes);
+    };
+    check(write_guest_string(kGuestData, "textures/hero.bin")
+            && write_guest_string(kGuestData + 0x100U, "../outside.bin"),
+        "asset path fixtures are staged in guest memory");
+
+    GuestCpuState32 state{};
+    state.r[0] = assets.asset_manager_handle();
+    state.r[1] = kGuestData;
+    state.r[2] = 3; // AASSET_MODE_BUFFER
+    auto [opened_state, opened_result] = invoke("AAssetManager_open", state);
+    const auto asset = opened_state.r[0];
+    check(opened_result.status == ExecutionStatus::Completed && asset != 0
+            && asset != assets.asset_manager_handle()
+            && heap.allocation_size(GuestAddress32{asset}).has_value()
+            && memory.is_mapped(GuestAddress32{asset}, 2U * sizeof(std::uint32_t)),
+        "AAssetManager_open returns a distinct guest-heap object with an opaque generation-checked handle");
+
+    state = {};
+    state.r[0] = asset;
+    auto [buffer_state, buffer_result] = invoke("AAsset_getBuffer", state);
+    std::array<std::byte, 4> buffered_contents{};
+    check(buffer_result.status == ExecutionStatus::Completed && buffer_state.r[0] != 0
+            && heap.allocation_size(GuestAddress32{buffer_state.r[0]}).value_or(0) >= source.size()
+            && memory.read(GuestAddress32{buffer_state.r[0]}, buffered_contents)
+            && buffered_contents == source,
+        "AAsset_getBuffer materializes immutable bytes in bounded guest heap memory");
+    const auto asset_buffer_address = buffer_state.r[0];
+
+    state = {};
+    state.r[0] = assets.asset_manager_handle();
+    state.r[1] = kGuestData + 0x100U;
+    state.r[2] = 0;
+    auto [traversal_state, traversal_result] = invoke("AAssetManager_open", state);
+    check(traversal_result.status == ExecutionStatus::Completed && traversal_state.r[0] == 0,
+        "AAssetManager_open rejects traversal and missing catalog entries");
+
+    state = {};
+    state.r[0] = asset;
+    auto [length_state, length_result] = invoke("AAsset_getLength64", state);
+    check(length_result.status == ExecutionStatus::Completed && length_state.r[0] == 4U
+            && length_state.r[1] == 0U,
+        "AAsset_getLength64 returns a guest-width 64-bit length");
+
+    state = {};
+    state.r[0] = asset;
+    state.r[1] = kGuestData + 0x400U;
+    state.r[2] = 2;
+    auto [read_state, read_result] = invoke("AAsset_read", state);
+    std::array<std::byte, 2> first_bytes{};
+    check(read_result.status == ExecutionStatus::Completed && read_state.r[0] == 2U
+            && memory.read(GuestAddress32{kGuestData + 0x400U}, first_bytes)
+            && first_bytes == std::array<std::byte, 2>{std::byte{'A'}, std::byte{'B'}},
+        "AAsset_read copies only the requested bounded range into writable guest memory");
+
+    state = {};
+    state.r[0] = asset;
+    state.r[1] = kReturnAddress; // mapped RX, deliberately not writable
+    state.r[2] = 1;
+    auto [bad_buffer_state, bad_buffer_result] = invoke("AAsset_read", state);
+    check(bad_buffer_result.status == ExecutionStatus::Completed
+            && bad_buffer_state.r[0] == std::numeric_limits<std::uint32_t>::max(),
+        "AAsset_read reports an invalid guest destination without faulting the interpreter");
+
+    check(memory.write_u32(GuestAddress32{kGuestStack}, 0U), "64-bit asset seek whence argument is staged");
+    state = {};
+    state.r[0] = asset;
+    state.r[2] = 1U; // off64_t in r2/r3 after AAPCS 64-bit alignment
+    state.r[3] = 0U;
+    auto [seek64_state, seek64_result] = invoke("AAsset_seek64", state);
+    check(seek64_result.status == ExecutionStatus::Completed && seek64_state.r[0] == 1U
+            && seek64_state.r[1] == 0U,
+        "AAsset_seek64 reads aligned 64-bit ARM arguments and reports its new offset");
+
+    state = {};
+    state.r[0] = asset;
+    state.r[1] = 2U;
+    state.r[2] = 0U; // SEEK_SET
+    auto [seek_state, seek_result] = invoke("AAsset_seek", state);
+    check(seek_result.status == ExecutionStatus::Completed && seek_state.r[0] == 2U,
+        "AAsset_seek implements bounded SEEK_SET semantics");
+
+    state = {};
+    state.r[0] = asset;
+    state.r[1] = kGuestData + 0x500U;
+    state.r[2] = 4U;
+    auto [read_rest_state, read_rest_result] = invoke("AAsset_read", state);
+    std::array<std::byte, 2> remainder{};
+    check(read_rest_result.status == ExecutionStatus::Completed && read_rest_state.r[0] == 2U
+            && memory.read(GuestAddress32{kGuestData + 0x500U}, remainder)
+            && remainder == std::array<std::byte, 2>{std::byte{'C'}, std::byte{'D'}},
+        "AAsset_read returns only the remaining bytes at end-of-file");
+
+    state = {};
+    state.r[0] = asset;
+    auto [remaining_state, remaining_result] = invoke("AAsset_getRemainingLength64", state);
+    check(remaining_result.status == ExecutionStatus::Completed && remaining_state.r[0] == 0U
+            && remaining_state.r[1] == 0U,
+        "AAsset_getRemainingLength64 reports end-of-file");
+
+    state = {};
+    state.r[0] = asset;
+    (void)invoke("AAsset_close", state);
+    check(!heap.allocation_size(GuestAddress32{asset_buffer_address}).has_value(),
+        "AAsset_close releases its guest-materialized buffer");
+    state = {};
+    state.r[0] = asset;
+    auto [stale_state, stale_result] = invoke("AAsset_read", state);
+    check(stale_result.status == ExecutionStatus::Completed
+            && stale_state.r[0] == std::numeric_limits<std::uint32_t>::max(),
+        "closing an asset invalidates its generation-checked handle");
+}
+
 void test_synthetic_jni_java_vm_tables_and_handles() {
     using namespace retrobridge::runtime;
     GuestMemory memory(1024U * 1024U);
@@ -1422,6 +1601,14 @@ void test_capabilities_and_optional_dbt_placeholder() {
         "synthetic JNI/JavaVM tables and the tested handle subset are reported available");
     check(!retrobridge::runtime::current_capabilities().synthetic_jni,
         "partial JNI support is not reported as a complete virtual Java runtime");
+    check(retrobridge::runtime::current_capabilities().android_asset_manager_thunks,
+        "the registered-blob AAsset subset is reported available");
+    check(!retrobridge::runtime::current_capabilities().android_native_window_input,
+        "native window and input remain explicitly unavailable");
+    check(!retrobridge::runtime::current_capabilities().headless_gles_egl,
+        "headless GLES/EGL remains explicitly unavailable");
+    check(!retrobridge::runtime::current_capabilities().opensl_es_audio_thunks,
+        "OpenSL ES audio remains explicitly unavailable");
     check(retrobridge::runtime::current_capabilities().arm32_instruction_execution,
         "bounded ARM instruction interpretation is reported available");
     check(!retrobridge::runtime::current_capabilities().arbitrary_guest_execution,
@@ -1441,6 +1628,7 @@ int main() {
     test_guest_heap_allocation_and_coalescing();
     test_arm32_syscall_dispatcher_and_guest_vfs();
     test_guest_bionic_libc_libm_and_pthread_thunks();
+    test_guest_android_asset_thunks();
     test_synthetic_jni_java_vm_tables_and_handles();
     test_a32_t32_execution_svc_and_trampolines();
     test_capabilities_and_optional_dbt_placeholder();

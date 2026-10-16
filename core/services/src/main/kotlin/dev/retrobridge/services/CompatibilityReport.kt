@@ -42,9 +42,14 @@ object CompatibilityReport {
             explanation = "A synthetic 32-bit JNI/JavaVM table and selected handles, marshaling, exception, and native-registration operations are tested. This is not ART or general Java execution; the full JNI table, GC, callbacks, and APK integration are absent.",
         ),
         Capability(
-            name = "NDK assets, native window, and input",
+            name = "NDK AAssetManager/AAsset subset",
+            status = CapabilityStatus.PARTIAL,
+            explanation = "A synthetic manager and read/getBuffer/seek/length/close thunks work with caller-registered bounded immutable blobs and generation-checked handles. APK assets, Java AssetManager conversion, asset directories, and APK launch integration are not connected.",
+        ),
+        Capability(
+            name = "ANativeWindow and Android input",
             status = CapabilityStatus.NOT_IMPLEMENTED,
-            explanation = "Guest AAssetManager, ANativeWindow, and Android input-event interfaces are not bridged.",
+            explanation = "There is no guest native-window buffer bridge or Android input-queue/event translation.",
         ),
         Capability(
             name = "Headless GLES/EGL",

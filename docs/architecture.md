@@ -34,9 +34,11 @@ RetroBridge is split so a later guest runtime can be developed without conflatin
 
 `Elf32Image::parse` validates little-endian ELFCLASS32 `EM_ARM` ET_EXEC/ET_DYN metadata. `Elf32Loader` maps PT_LOAD segments and permissions, parses dynamic symbols/hash tables, resolves symbols through a supplied callback, and applies a constrained ARM REL set. Unsupported RELA/RELR/Android packed relocations and full dependency loading are rejected rather than guessed. PT_TLS and full dynamic linking remain unsupported; the partial `GuestBionicThunks` symbol resolver can be supplied by a caller, but no complete Bionic or dependency-loading pipeline is integrated. `GuestLifecycleExecutor` retrieves validated DT_INIT/DT_INIT_ARRAY and DT_FINI_ARRAY/DT_FINI functions and calls them using a temporary return trampoline. Native tests cover A32/T32 constructors/destructors, and CI cross-compiles, loads, relocates, and executes integer and VFP ARM32 ELF fixtures on the host.
 
-### Guest references
+### Guest references and NDK assets
 
 `HandleTable` maps guest-width handles to opaque host tokens. `GuestJniBridge` allocates 32-bit `JNIEnv`/`JavaVM` tables in guest memory, registers address-based trampolines, implements a tested string/array/reference/local-frame/exception subset, and validates guest `RegisterNatives` descriptors and executable entry points. It has no ART, class loader, Java-method engine, callback scheduler, GC, modified UTF-8, or concurrency; unsupported table slots set an explicit pending exception. This is not a virtual Android Java runtime or `JNI_OnLoad` launcher.
+
+`GuestAndroidAssetThunks` exposes a bounded `AAssetManager_open`/`AAsset_read`/`AAsset_getBuffer`/seek/length/close subset over caller-registered immutable byte blobs. Asset handles are generation-checked opaque guest values; `getBuffer` materializes bytes in the bounded guest heap, paths reject traversal, and blob/catalog sizes are capped. There is no APK ZIP asset provider, Java `AssetManager` conversion, directory API, or launch integration. `ANativeWindow`, Android input, headless GLES/EGL, and OpenSL ES remain unavailable.
 
 ### Persistence and per-app storage
 

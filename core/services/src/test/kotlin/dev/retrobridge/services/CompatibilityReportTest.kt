@@ -26,6 +26,10 @@ class CompatibilityReportTest {
             report.getValue("JNI and JavaVM").status,
         )
         assertEquals(
+            CapabilityStatus.PARTIAL,
+            report.getValue("NDK AAssetManager/AAsset subset").status,
+        )
+        assertEquals(
             CapabilityStatus.NOT_IMPLEMENTED,
             report.getValue("Execution of arbitrary guest APKs").status,
         )
@@ -37,7 +41,7 @@ class CompatibilityReportTest {
         val report = CompatibilityReport.capabilities.associateBy(Capability::name)
 
         listOf(
-            "NDK assets, native window, and input",
+            "ANativeWindow and Android input",
             "Headless GLES/EGL",
             "OpenSL ES audio",
             "Guest IPC and Android framework virtualization",
