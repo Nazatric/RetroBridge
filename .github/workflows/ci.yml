@@ -132,7 +132,11 @@ jobs:
               echo '```text' >> "$GITHUB_STEP_SUMMARY"
               tail -n 100 "$log" >> "$GITHUB_STEP_SUMMARY"
               echo '```' >> "$GITHUB_STEP_SUMMARY"
-              message="$(tail -n 100 "$log" | base64 -w0)"
+              if [[ "$log" == *gradle.log ]]; then
+                message="$( { grep -n -E 'FAILURE:|What went wrong|Execution failed|FAILED|error:|e: |Caused by:|Could not resolve|A problem occurred' "$log" | tail -n 100 || true; echo '--- last 50 lines ---'; tail -n 50 "$log"; } | base64 -w0)"
+              else
+                message="$(tail -n 100 "$log" | base64 -w0)"
+              fi
               echo "::error title=RetroBridge diagnostic base64 ($log)::$message"
             fi
           done
