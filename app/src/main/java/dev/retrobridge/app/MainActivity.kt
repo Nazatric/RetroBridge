@@ -6,6 +6,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import android.provider.OpenableColumns
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -114,6 +115,91 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                fun replaceRecord(record: GuestAppRecord) {
+                    val index = apps.indexOfFirst { it.id == record.id }
+                    if (index >= 0) apps[index] = record
+                }
+
+                val dataArchivePicker = rememberLauncherForActivityResult(
+                    ActivityResultContracts.OpenDocument(),
+                ) { uri: Uri? ->
+                    val target = apps.firstOrNull { it.id == selectedId }
+                    if (uri != null && target != null) {
+                        scope.launch {
+                            try {
+                                val manager = importer ?: error("Registry is unavailable")
+                                val (updated, result) = withContext(Dispatchers.IO) {
+                                    val input = contentResolver.openInputStream(uri)
+                                        ?: error("Unable to open the selected ZIP")
+                                    input.use { manager.importDataArchive(target, it) }
+                                }
+                                replaceRecord(updated)
+                                storageRefresh += 1
+                                snackbarHostState.showSnackbar(
+                                    "Imported ${result.filesImported} data files (${formatBytes(result.uncompressedBytes)}).",
+                                )
+                            } catch (failure: Exception) {
+                                snackbarHostState.showSnackbar("Data ZIP import failed: ${failure.message ?: "unknown error"}")
+                            }
+                        }
+                    }
+                }
+
+                val obbPicker = rememberLauncherForActivityResult(
+                    ActivityResultContracts.OpenDocument(),
+                ) { uri: Uri? ->
+                    val target = apps.firstOrNull { it.id == selectedId }
+                    if (uri != null && target != null) {
+                        scope.launch {
+                            try {
+                                val manager = importer ?: error("Registry is unavailable")
+                                val (updated, result) = withContext(Dispatchers.IO) {
+                                    val filename = queryDisplayName(uri)
+                                    val input = contentResolver.openInputStream(uri)
+                                        ?: error("Unable to open the selected OBB")
+                                    input.use {
+                                        if (filename.endsWith(".zip", ignoreCase = true)) {
+                                            manager.importObbBundle(target, it)
+                                        } else {
+                                            manager.importObbFile(target, filename, it)
+                                        }
+                                    }
+                                }
+                                replaceRecord(updated)
+                                storageRefresh += 1
+                                snackbarHostState.showSnackbar(
+                                    "Imported ${result.paths.size} OBB file(s) (${formatBytes(result.bytesImported)}).",
+                                )
+                            } catch (failure: Exception) {
+                                snackbarHostState.showSnackbar("OBB import failed: ${failure.message ?: "unknown error"}")
+                            }
+                        }
+                    }
+                }
+
+                val exportPicker = rememberLauncherForActivityResult(
+                    ActivityResultContracts.CreateDocument("application/zip"),
+                ) { uri: Uri? ->
+                    val target = apps.firstOrNull { it.id == selectedId }
+                    if (uri != null && target != null) {
+                        scope.launch {
+                            try {
+                                val manager = importer ?: error("Registry is unavailable")
+                                val result = withContext(Dispatchers.IO) {
+                                    val output = contentResolver.openOutputStream(uri)
+                                        ?: error("Unable to create the destination ZIP")
+                                    output.use { manager.exportGuestData(target, it) }
+                                }
+                                snackbarHostState.showSnackbar(
+                                    "Exported ${result.filesExported} files (${formatBytes(result.bytesExported)}).",
+                                )
+                            } catch (failure: Exception) {
+                                snackbarHostState.showSnackbar("Export failed: ${failure.message ?: "unknown error"}")
+                            }
+                        }
+                    }
+                }
+
                 Scaffold(snackbarHost = { SnackbarHost(snackbarHostState) }) { padding ->
                     if (selected == null) {
                         AppListScreen(
@@ -137,6 +223,15 @@ class MainActivity : ComponentActivity() {
                             record = selected,
                             storage = storage,
                             onBack = { selectedId = null },
+                            onAttachData = {
+                                dataArchivePicker.launch(arrayOf("application/zip", "application/x-zip-compressed", "*/*"))
+                            },
+                            onAttachObb = {
+                                obbPicker.launch(arrayOf("application/octet-stream", "application/zip", "*/*"))
+                            },
+                            onExport = {
+                                exportPicker.launch("${selected.packageName}-retrobridge-data.zip")
+                            },
                             onClearData = {
                                 scope.launch {
                                     try {
@@ -170,6 +265,19 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    private fun queryDisplayName(uri: Uri): String {
+        val cursor = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+        if (cursor != null) {
+            cursor.use {
+                if (it.moveToFirst()) {
+                    val column = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (column >= 0) it.getString(column)?.takeIf(String::isNotBlank)?.let { name -> return name }
+                }
+            }
+        }
+        return uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':') ?: "selected.obb"
     }
 }
 
@@ -226,6 +334,9 @@ private fun AppDetailsScreen(
     record: GuestAppRecord,
     storage: StorageBreakdown?,
     onBack: () -> Unit,
+    onAttachData: () -> Unit,
+    onAttachObb: () -> Unit,
+    onExport: () -> Unit,
     onClearData: () -> Unit,
     onRemove: () -> Unit,
 ) {
@@ -276,10 +387,9 @@ private fun AppDetailsScreen(
         InfoRow("Android/data archive", record.dataArchiveState.name.lowercase())
         InfoRow("OBB", "${record.obbState.name.lowercase()} · ${record.obbFiles.joinToString().ifBlank { "no files" }}")
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = {}, enabled = false) { Text("Attach data ZIP") }
-            OutlinedButton(onClick = {}, enabled = false) { Text("Attach OBB") }
+            OutlinedButton(onClick = onAttachData) { Text("Attach data ZIP") }
+            OutlinedButton(onClick = onAttachObb) { Text("Attach OBB / ZIP") }
         }
-        Text("Data archive and OBB import are not implemented yet.", style = MaterialTheme.typography.bodySmall)
 
         HorizontalDivider()
         Text("Storage", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
@@ -323,9 +433,9 @@ private fun AppDetailsScreen(
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = {}, enabled = false) { Text("Launch") }
             OutlinedButton(onClick = {}, enabled = false) { Text("Stop") }
-            OutlinedButton(onClick = {}, enabled = false) { Text("Export") }
+            OutlinedButton(onClick = onExport) { Text("Export data ZIP") }
         }
-        Text("Launch, Stop, and Export remain disabled until a safe guest execution and export path exists.", style = MaterialTheme.typography.bodySmall)
+        Text("Launch and Stop remain disabled because arbitrary Android framework execution is not yet supported.", style = MaterialTheme.typography.bodySmall)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { pendingAction = PendingAction.CLEAR_DATA }) { Text("Clear Data") }
             OutlinedButton(onClick = { pendingAction = PendingAction.REMOVE }) { Text("Remove") }

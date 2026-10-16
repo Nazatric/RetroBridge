@@ -159,6 +159,18 @@ class GuestStorage(
         deleteTree(appRoot)
     }
 
+    fun importAndroidDataArchive(input: java.io.InputStream): ArchiveImportResult =
+        GuestArchiveOperations(this).importAndroidDataArchive(input)
+
+    fun importObbFile(input: java.io.InputStream, filename: String): ObbImportResult =
+        GuestArchiveOperations(this).importObbFile(input, filename)
+
+    fun importObbBundle(input: java.io.InputStream): ObbImportResult =
+        GuestArchiveOperations(this).importObbBundle(input)
+
+    fun exportGuestData(output: java.io.OutputStream): GuestExportResult =
+        GuestArchiveOperations(this).exportGuestData(output)
+
     fun storageBreakdown(): StorageBreakdown {
         if (!Files.exists(appRoot, LinkOption.NOFOLLOW_LINKS)) return StorageBreakdown(0, 0, 0, 0, 0)
         rejectSymlinksBetween(privateRoot.toAbsolutePath().normalize(), appRoot)

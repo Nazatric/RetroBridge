@@ -4,7 +4,10 @@ import android.content.Context
 import android.content.pm.PackageInfo
 import android.net.Uri
 import android.os.Build
+import dev.retrobridge.fs.ArchiveImportResult
+import dev.retrobridge.fs.GuestExportResult
 import dev.retrobridge.fs.GuestStorage
+import dev.retrobridge.fs.ObbImportResult
 import dev.retrobridge.manager.AttachmentState
 import dev.retrobridge.manager.GuestAppRecord
 import dev.retrobridge.manager.GuestAppRepository
@@ -101,6 +104,37 @@ class ApkImporter(
         storageFor(record).clearGuestData()
     }
 
+    fun importDataArchive(record: GuestAppRecord, input: java.io.InputStream): Pair<GuestAppRecord, ArchiveImportResult> {
+        val current = requireCurrentRecord(record)
+        val imported = storageFor(current).importAndroidDataArchive(input)
+        val updated = repository.update(current.id) { latest ->
+            latest.copy(
+                dataArchiveState = AttachmentState.IMPORTED,
+                updatedAtEpochMs = maxOf(System.currentTimeMillis(), latest.updatedAtEpochMs),
+            )
+        }
+        return updated to imported
+    }
+
+    fun importObbFile(
+        record: GuestAppRecord,
+        filename: String,
+        input: java.io.InputStream,
+    ): Pair<GuestAppRecord, ObbImportResult> {
+        val current = requireCurrentRecord(record)
+        val imported = storageFor(current).importObbFile(input, filename)
+        return updateObbManifest(current.id, imported)
+    }
+
+    fun importObbBundle(record: GuestAppRecord, input: java.io.InputStream): Pair<GuestAppRecord, ObbImportResult> {
+        val current = requireCurrentRecord(record)
+        val imported = storageFor(current).importObbBundle(input)
+        return updateObbManifest(current.id, imported)
+    }
+
+    fun exportGuestData(record: GuestAppRecord, output: java.io.OutputStream): GuestExportResult =
+        storageFor(requireCurrentRecord(record)).exportGuestData(output)
+
     fun remove(record: GuestAppRecord) {
         val stored = repository.get(record.id) ?: return
         require(stored.packageName == record.packageName) { "Application identity mismatch" }
@@ -109,6 +143,23 @@ class ApkImporter(
     }
 
     fun storageBreakdown(record: GuestAppRecord) = storageFor(record).storageBreakdown()
+
+    private fun requireCurrentRecord(record: GuestAppRecord): GuestAppRecord {
+        val current = repository.get(record.id) ?: throw NoSuchElementException("Application was removed")
+        require(current.packageName == record.packageName) { "Application identity mismatch" }
+        return current
+    }
+
+    private fun updateObbManifest(id: String, imported: ObbImportResult): Pair<GuestAppRecord, ObbImportResult> {
+        val updated = repository.update(id) { latest ->
+            latest.copy(
+                obbState = AttachmentState.IMPORTED,
+                obbFiles = (latest.obbFiles + imported.paths).distinct().sorted(),
+                updatedAtEpochMs = maxOf(System.currentTimeMillis(), latest.updatedAtEpochMs),
+            )
+        }
+        return updated to imported
+    }
 
     private fun storageFor(record: GuestAppRecord): GuestStorage {
         val expectedRoot = privateRoot.toAbsolutePath().normalize()

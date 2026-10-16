@@ -4,8 +4,10 @@ This matrix describes what the current tree implements. “Available” means th
 
 | Area | Current status | Boundaries |
 | --- | --- | --- |
-| Import a single APK | Partial | Copies a document-provider selection to private storage, hashes it, reads package/version/SDK metadata, and catalogs `.so` files inside the APK. Split APKs, package installation, and data/OBB attachment UI are not implemented. |
-| Management UI | Partial | Lists imported records, shows details and capability diagnostics, supports clearing the prototype's guest-owned directories and removing one imported record. Launch, Stop, and Export are visibly disabled. |
+| Import a single APK | Partial | Copies a document-provider selection to private storage, hashes it, reads package/version/SDK metadata, and catalogs `.so` files inside the APK. Split APKs and package installation are not implemented. |
+| Management UI | Partial | Lists imported records, shows details and capability diagnostics, supports guest data/OBB attachments, export, clearing guest-owned directories, and removing one imported record. Launch and Stop stay disabled until execution is implemented. |
+| Android/data ZIP import | Available | Streams into private temporary storage, enforces compressed/uncompressed byte and entry quotas, validates optional package-qualified roots, rejects traversal/duplicate paths/Unix symlinks, and commits with rollback. This is data import, not Android app installation. |
+| OBB import and export | Available | Imports one package/version-qualified `.obb` or ZIP bundles of associated OBBs with quotas and path/symlink checks. SAF ZIP export streams guest internal/external/OBB files and a JSON manifest. |
 | Registry | Available | App-private JSON registry, record/path validation, and atomic replacement. It is not encrypted and relies on Android's normal application sandbox. |
 | ARM32 ELF identification | Available | Host validator accepts supported ELF32 little-endian `EM_ARM` ET_EXEC/ET_DYN metadata; CI uses actual NDK-produced ARM32 executable and shared-object fixtures. |
 | ELF loading/linking | Not implemented | No segment mapping, page permissions, relocation processing, dependency loader, symbol resolution, constructors, TLS, or Bionic linker. |

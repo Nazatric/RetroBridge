@@ -5,6 +5,7 @@ RetroBridge is an experimental, rootless-first research project for inspecting a
 ## Honest status
 
 - APK metadata import and private per-app storage: prototype implementation.
+- Android/data ZIP import, associated OBB import, and SAF guest-data/OBB-manifest export: implemented with streaming quotas, package/path validation, symlink rejection, and transactional file replacement.
 - ARM32 ELF header/program-header and dependency metadata inspection: implemented; checked with real ARM32 ELF fixtures in CI.
 - Host APK UI and compatibility report: scaffolded.
 - ARM32 instruction translation, custom relocation/linking, Bionic/syscall emulation, synthetic JNI, and guest framework services: **not implemented**.
@@ -17,7 +18,7 @@ See [the compatibility matrix](docs/compatibility-matrix.md), [architecture note
 
 - `app/` — Kotlin/Jetpack Compose management UI and APK import flow.
 - `core/manager/` — app metadata, persistent registry, and lifecycle state machine.
-- `core/fs/` — isolated guest directory layout and guarded guest-path mapping.
+- `core/fs/` — isolated guest directory layout, guarded guest-path mapping, streaming data/OBB archive import, and guest-data ZIP export.
 - `core/services/` — explicit, machine-readable capability reporting.
 - `core/runtime/` — Android native-library module and C++ runtime interfaces.
 - `native/` — host-side CMake validation tools and tests; ARM32 binaries are generated in CI, not checked in.
