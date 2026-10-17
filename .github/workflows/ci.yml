@@ -170,7 +170,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p diagnostics
-          exec > >(tee -a diagnostics/emulator-setup.log) 2>&1
+          exec > diagnostics/emulator-setup.log 2>&1
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           AVDMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
           if [[ ! -x "$SDKMANAGER" ]]; then SDKMANAGER="$(command -v sdkmanager || true)"; fi
