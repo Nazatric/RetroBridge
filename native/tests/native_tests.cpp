@@ -2873,6 +2873,48 @@ void test_a32_t32_execution_svc_and_trampolines() {
             && stored_halfword.has_value() && *stored_halfword == 0x1234U,
         "T32 pre/post-indexed word, halfword, and signed-byte transfers apply writeback and bounds checks");
 
+    check(memory.map_zeroed(GuestAddress32{0x3800}, 0x100,
+            GuestPermission::Read | GuestPermission::Write),
+        "T32 register-offset test data maps read/write");
+    const std::array<std::byte, 1> register_offset_byte{std::byte{0x44}};
+    check(memory.write(GuestAddress32{0x3804}, register_offset_byte)
+            && memory.write_u16(GuestAddress32{0x3806}, 0x8001U),
+        "T32 byte and signed-halfword sources are staged");
+    std::vector<std::byte> thumb_register_offset_program(30, std::byte{0});
+    put_u16(thumb_register_offset_program, 0, 0xf841U); // str r0, [r1, r2, lsl #2]
+    put_u16(thumb_register_offset_program, 2, 0x0022U);
+    put_u16(thumb_register_offset_program, 4, 0xf851U); // ldr r3, [r1, r2, lsl #2]
+    put_u16(thumb_register_offset_program, 6, 0x3022U);
+    put_u16(thumb_register_offset_program, 8, 0xf811U); // ldrb r4, [r1, r5]
+    put_u16(thumb_register_offset_program, 10, 0x4005U);
+    put_u16(thumb_register_offset_program, 12, 0xf931U); // ldrsh r6, [r1, r7, lsl #1]
+    put_u16(thumb_register_offset_program, 14, 0x6017U);
+    put_u16(thumb_register_offset_program, 16, 0xf801U); // strb r8, [r1, r5]
+    put_u16(thumb_register_offset_program, 18, 0x8005U);
+    put_u16(thumb_register_offset_program, 20, 0xf891U); // ldrb r9, [r1, r5]
+    put_u16(thumb_register_offset_program, 22, 0x9005U);
+    put_u16(thumb_register_offset_program, 24, 0x2701U); // movs r7, #1
+    put_u16(thumb_register_offset_program, 26, 0xdf00U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x3400}, thumb_register_offset_program,
+            thumb_register_offset_program.size(), GuestPermission::Read | GuestPermission::Execute),
+        "T32 register-offset load/store test code maps RX");
+    GuestCpuState32 thumb_register_offset_state{};
+    thumb_register_offset_state.r[0] = 0x11223344U;
+    thumb_register_offset_state.r[1] = 0x3800U;
+    thumb_register_offset_state.r[2] = 2U;
+    thumb_register_offset_state.r[5] = 4U;
+    thumb_register_offset_state.r[7] = 3U;
+    thumb_register_offset_state.r[8] = 0x5aU;
+    const auto thumb_register_offset_result = interpreter.run(
+        thumb_register_offset_state, GuestAddress32{0x3401}, 16);
+    check(thumb_register_offset_result.status == ExecutionStatus::Completed
+            && thumb_register_offset_state.r[3] == 0x11223344U
+            && thumb_register_offset_state.r[4] == 0x44U
+            && thumb_register_offset_state.r[6] == 0xffff8001U
+            && thumb_register_offset_state.r[9] == 0x5aU
+            && memory.read_u32(GuestAddress32{0x3808}).value_or(0) == 0x11223344U,
+        "T32 register-offset word/byte transfers apply scaled indices and signed halfword loads");
+
     check(memory.map_zeroed(GuestAddress32{0xa000}, 0x1000,
             GuestPermission::Read | GuestPermission::Write),
         "T32 multiple-transfer stack region maps read/write");

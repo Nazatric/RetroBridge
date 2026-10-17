@@ -1255,6 +1255,50 @@ void write_vfp_double(GuestCpuState32& state, unsigned index, std::uint64_t valu
         }
     }
 
+    if ((second & 0x0800U) == 0) {
+        unsigned indexed_size = 4;
+        bool indexed_load = false;
+        bool indexed_signed = false;
+        bool indexed_store = false;
+        switch (first_opcode) {
+            case 0xf850U: indexed_load = true; break;  // LDR (register)
+            case 0xf840U: indexed_store = true; break; // STR (register)
+            case 0xf810U: indexed_load = true; indexed_size = 1; break;
+            case 0xf800U: indexed_store = true; indexed_size = 1; break;
+            case 0xf830U: indexed_load = true; indexed_size = 2; break;
+            case 0xf820U: indexed_store = true; indexed_size = 2; break;
+            case 0xf910U: indexed_load = true; indexed_size = 1; indexed_signed = true; break;
+            case 0xf930U: indexed_load = true; indexed_size = 2; indexed_signed = true; break;
+            default: break;
+        }
+        if (indexed_load || indexed_store) {
+            const auto rm = second & 0xfU;
+            if ((second & 0x0fc0U) != 0 || rn == 15U || rm == 15U || (!indexed_load && rd == 15U)) {
+                return fault("invalid T32 register-offset load/store encoding or register");
+            }
+            const auto shift = (second >> 4U) & 3U;
+            const auto base = state.r[rn];
+            const auto offset = static_cast<std::uint64_t>(state.r[rm]) << shift;
+            const auto address = static_cast<std::uint64_t>(base) + offset;
+            const auto address_end = address + indexed_size;
+            const auto address_space_end = static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) + 1U;
+            if (address > std::numeric_limits<std::uint32_t>::max() || address_end > address_space_end) {
+                return fault("T32 register-offset load/store address wraps the guest address space");
+            }
+            if (indexed_load) {
+                std::uint32_t value = 0;
+                if (!read_guest_value(memory, static_cast<std::uint32_t>(address), indexed_size, value, indexed_signed)) {
+                    return fault("T32 register-offset load accessed unreadable guest memory");
+                }
+                if (rd == 15U) branch_exchange(state, value);
+                else state.r[rd] = value;
+            } else if (!write_guest_value(memory, static_cast<std::uint32_t>(address), indexed_size, state.r[rd])) {
+                return fault("T32 register-offset store accessed read-only guest memory");
+            }
+            return {};
+        }
+    }
+
     unsigned size = 4;
     bool load = false;
     bool signed_load = false;
