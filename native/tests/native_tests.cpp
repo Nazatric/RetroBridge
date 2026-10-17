@@ -2834,6 +2834,45 @@ void test_a32_t32_execution_svc_and_trampolines() {
             && branch_eq_result.status == ExecutionStatus::Completed && branch_eq_state.r[0] == 1U,
         "T32 conditional B.W follows APSR conditions and sign-extended displacement");
 
+    check(memory.map_zeroed(GuestAddress32{0x3200}, 0x100,
+            GuestPermission::Read | GuestPermission::Write),
+        "T32 indexed memory test data maps read/write");
+    std::vector<std::byte> thumb_indexed_memory_program(28, std::byte{0});
+    put_u16(thumb_indexed_memory_program, 0, 0xf841U); // str r0, [r1, #4]!
+    put_u16(thumb_indexed_memory_program, 2, 0x0f04U);
+    put_u16(thumb_indexed_memory_program, 4, 0xf851U); // ldr r2, [r1], #4
+    put_u16(thumb_indexed_memory_program, 6, 0x2b04U);
+    put_u16(thumb_indexed_memory_program, 8, 0xf801U); // strb r3, [r1, #-1]!
+    put_u16(thumb_indexed_memory_program, 10, 0x3d01U);
+    put_u16(thumb_indexed_memory_program, 12, 0xf991U); // ldrsb r4, [r1]
+    put_u16(thumb_indexed_memory_program, 14, 0x4000U);
+    put_u16(thumb_indexed_memory_program, 16, 0xf821U); // strh r5, [r1, #1]!
+    put_u16(thumb_indexed_memory_program, 18, 0x5f01U);
+    put_u16(thumb_indexed_memory_program, 20, 0xf8b1U); // ldrh r6, [r1]
+    put_u16(thumb_indexed_memory_program, 22, 0x6000U);
+    put_u16(thumb_indexed_memory_program, 24, 0x2701U); // movs r7, #1
+    put_u16(thumb_indexed_memory_program, 26, 0xdf00U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x3100}, thumb_indexed_memory_program,
+            thumb_indexed_memory_program.size(), GuestPermission::Read | GuestPermission::Execute),
+        "T32 indexed memory test code maps RX");
+    GuestCpuState32 thumb_indexed_memory_state{};
+    thumb_indexed_memory_state.r[0] = 0xaabbccddU;
+    thumb_indexed_memory_state.r[1] = 0x3200U;
+    thumb_indexed_memory_state.r[3] = 0x80U;
+    thumb_indexed_memory_state.r[5] = 0x1234U;
+    const auto thumb_indexed_memory_result = interpreter.run(
+        thumb_indexed_memory_state, GuestAddress32{0x3101}, 24);
+    const auto stored_byte = memory.read_u8(GuestAddress32{0x3207});
+    const auto stored_halfword = memory.read_u16(GuestAddress32{0x3208});
+    check(thumb_indexed_memory_result.status == ExecutionStatus::Completed
+            && thumb_indexed_memory_state.r[1] == 0x3208U
+            && thumb_indexed_memory_state.r[2] == 0xaabbccddU
+            && thumb_indexed_memory_state.r[4] == 0xffffff80U
+            && thumb_indexed_memory_state.r[6] == 0x1234U
+            && stored_byte.has_value() && *stored_byte == 0x80U
+            && stored_halfword.has_value() && *stored_halfword == 0x1234U,
+        "T32 pre/post-indexed word, halfword, and signed-byte transfers apply writeback and bounds checks");
+
     std::vector<std::byte> thumb_table(8, std::byte{0});
     thumb_table[1] = static_cast<std::byte>(6U);
     put_u16(thumb_table, 4, 6U);
