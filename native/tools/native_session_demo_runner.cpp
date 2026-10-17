@@ -77,10 +77,11 @@ int main(int argc, char** argv) {
                         result_code = fail("JNI_OnLoad did not return JNI_VERSION_1_6");
                     }
                     const auto entrypoint = std::find_if(report.entrypoint_results.begin(), report.entrypoint_results.end(),
-                        [](const std::string& value) { return value.find("retrobridge_main => 42") != std::string::npos; });
+                        [](const std::string& value) { return value.find("!retrobridge_main => ") != std::string::npos; });
                     if (entrypoint == report.entrypoint_results.end()) {
-                        result_code = fail("retrobridge_main did not return 42; the session reported no entrypoint result");
-                    } else if (entrypoint->find("retrobridge_main => 42") == std::string::npos) {
+                        result_code = fail("session reported no retrobridge_main result; entrypoints=["
+                            + (report.entrypoint_results.empty() ? std::string("<empty>") : report.entrypoint_results.front()) + "]");
+                    } else if (entrypoint->find("!retrobridge_main => 42") == std::string::npos) {
                         result_code = fail("retrobridge_main returned an unexpected result: " + *entrypoint);
                     }
                     const auto output_path = root / "internal/files/native-demo.txt";
@@ -92,14 +93,16 @@ int main(int argc, char** argv) {
                     if (constructor == std::string::npos || on_load == std::string::npos || entry == std::string::npos
                         || before_stop.find("math-failed") != std::string::npos
                         || !(constructor < on_load && on_load < entry)) {
-                        result_code = fail("constructor, JNI_OnLoad, entrypoint, or VFS file-write order is incorrect");
+                        result_code = fail("constructor, JNI_OnLoad, entrypoint, or VFS file-write order is incorrect; guest VFS output=["
+                            + (before_stop.empty() ? std::string("<empty>") : before_stop) + "]");
                     }
                     session.stop();
                     std::ifstream final_output(output_path);
                     const std::string after_stop((std::istreambuf_iterator<char>(final_output)), std::istreambuf_iterator<char>());
                     const auto destructor = after_stop.find("destructor\n");
-                    if (destructor == std::string::npos || entry >= destructor) {
-                        result_code = fail("guest destructor did not write after the selected entrypoint");
+                    if (destructor == std::string::npos || entry == std::string::npos || entry >= destructor) {
+                        result_code = fail("guest destructor did not write after the selected entrypoint; guest VFS output=["
+                            + (after_stop.empty() ? std::string("<empty>") : after_stop) + "]");
                     }
                     if (result_code == 0) {
                         std::cout << "{\"success\":true,\"guest_instructions\":" << report.guest_instructions
