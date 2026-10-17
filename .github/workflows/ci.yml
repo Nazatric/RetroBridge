@@ -189,14 +189,26 @@ jobs:
           fi
           ADB="$ANDROID_HOME/platform-tools/adb"
           EMULATOR="$ANDROID_HOME/emulator/emulator"
+          if [[ ! -x "$EMULATOR" ]]; then
+            path_emulator="$(command -v emulator || true)"
+            [[ -z "$path_emulator" ]] || EMULATOR="$path_emulator"
+          fi
           SYSTEM_IMAGE="$ANDROID_HOME/system-images/android-35/google_apis/x86_64"
           packages=()
           [[ -x "$ADB" ]] || packages+=("platform-tools")
           [[ -x "$EMULATOR" ]] || packages+=("emulator")
           [[ -d "$SYSTEM_IMAGE" ]] || packages+=("system-images;android-35;google_apis;x86_64")
           echo "SDK packages requested: ${packages[*]:-none}"
+          SDKMANAGER_LOG=diagnostics/emulator-sdkmanager.log
           if (( ${#packages[@]} > 0 )); then
-            "$SDKMANAGER" --install "${packages[@]}"
+            if "$SDKMANAGER" --install "${packages[@]}" >"$SDKMANAGER_LOG" 2>&1; then
+              tr '\r' '\n' < "$SDKMANAGER_LOG" | tail -n 20
+            else
+              sdkmanager_status=$?
+              echo "sdkmanager failed with exit code $sdkmanager_status"
+              tr '\r' '\n' < "$SDKMANAGER_LOG" | tail -n 40
+              exit "$sdkmanager_status"
+            fi
           fi
           if [[ ! -x "$ADB" || ! -x "$EMULATOR" || ! -d "$SYSTEM_IMAGE" ]]; then
             echo "Android emulator tooling or API 35 x86_64 system image is unavailable after provisioning." >&2
@@ -205,8 +217,28 @@ jobs:
           fi
           echo "Using sdkmanager=$SDKMANAGER avdmanager=$AVDMANAGER adb=$ADB emulator=$EMULATOR system_image=$SYSTEM_IMAGE"
           export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
-          echo no | "$AVDMANAGER" create avd --force --name retrobridge-ci \
-            --package "system-images;android-35;google_apis;x86_64" --device pixel_2
+          AVD_ROOT="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/retrobridge-avd"
+          ANDROID_SDK_HOME="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/retrobridge-sdk-home"
+          export ANDROID_AVD_HOME="$AVD_ROOT" ANDROID_SDK_HOME
+          mkdir -p "$ANDROID_AVD_HOME" "$ANDROID_SDK_HOME"
+          echo "HOME=$HOME ANDROID_AVD_HOME=$ANDROID_AVD_HOME ANDROID_SDK_HOME=$ANDROID_SDK_HOME"
+          AVDMANAGER_LOG=diagnostics/emulator-avdmanager.log
+          if echo no | "$AVDMANAGER" create avd --force --name retrobridge-ci \
+            --path "$ANDROID_AVD_HOME/retrobridge-ci.avd" \
+            --package "system-images;android-35;google_apis;x86_64" --device pixel_2 >"$AVDMANAGER_LOG" 2>&1; then
+            tail -n 40 "$AVDMANAGER_LOG"
+          else
+            avdmanager_status=$?
+            echo "avdmanager failed with exit code $avdmanager_status"
+            tail -n 80 "$AVDMANAGER_LOG"
+            exit "$avdmanager_status"
+          fi
+          "$EMULATOR" -list-avds | tee diagnostics/emulator-avds.log
+          if ! grep -Fxq retrobridge-ci diagnostics/emulator-avds.log; then
+            echo "avdmanager did not register retrobridge-ci under ANDROID_AVD_HOME." >&2
+            find "$ANDROID_AVD_HOME" -maxdepth 3 -type f -print >&2 || true
+            exit 1
+          fi
           "$EMULATOR" -avd retrobridge-ci -no-window -no-audio \
             -no-boot-anim -no-snapshot -no-snapshot-save -gpu swiftshader_indirect -accel auto \
             -verbose -show-kernel > diagnostics/emulator.log 2>&1 &
@@ -250,14 +282,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for log in diagnostics/emulator-setup.log diagnostics/emulator.log diagnostics/emulator-instrumentation.log diagnostics/gradle.log diagnostics/demo-apk.log diagnostics/ctest.log diagnostics/native-build.log diagnostics/arm32-fixtures.log diagnostics/arm32-demo-dynamic-dependencies.log diagnostics/arm32-demo-disassembly.log diagnostics/arm32-vfp-disassembly.log diagnostics/arm32-interpreter-benchmark.json diagnostics/demo-apk-zipalign.log diagnostics/demo-apk-signature.log; do
+          for log in diagnostics/emulator-setup.log diagnostics/emulator-sdkmanager.log diagnostics/emulator-avdmanager.log diagnostics/emulator-avds.log diagnostics/emulator.log diagnostics/emulator-instrumentation.log diagnostics/gradle.log diagnostics/demo-apk.log diagnostics/ctest.log diagnostics/native-build.log diagnostics/arm32-fixtures.log diagnostics/arm32-demo-dynamic-dependencies.log diagnostics/arm32-demo-disassembly.log diagnostics/arm32-vfp-disassembly.log diagnostics/arm32-interpreter-benchmark.json diagnostics/demo-apk-zipalign.log diagnostics/demo-apk-signature.log; do
             if [[ -s "$log" ]]; then
-              echo "### $log (last 100 lines)" >> "$GITHUB_STEP_SUMMARY"
+              echo "### $log (diagnostic tail)" >> "$GITHUB_STEP_SUMMARY"
               echo '```text' >> "$GITHUB_STEP_SUMMARY"
-              tail -n 100 "$log" >> "$GITHUB_STEP_SUMMARY"
+              if [[ "$log" == *sdkmanager.log ]]; then
+                tr '\r' '\n' < "$log" | tail -n 40 >> "$GITHUB_STEP_SUMMARY"
+              else
+                tail -n 100 "$log" >> "$GITHUB_STEP_SUMMARY"
+              fi
               echo '```' >> "$GITHUB_STEP_SUMMARY"
               if [[ "$log" == *gradle.log ]]; then
                 message="$( { grep -n -E 'FAILURE:|What went wrong|Execution failed|FAILED|error:|e: |Caused by:|Could not resolve|A problem occurred' "$log" | tail -n 100 || true; echo '--- last 50 lines ---'; tail -n 50 "$log"; } | base64 -w0)"
+              elif [[ "$log" == *sdkmanager.log ]]; then
+                message="$(tr '\r' '\n' < "$log" | tail -n 40 | base64 -w0)"
               else
                 message="$(tail -n 100 "$log" | base64 -w0)"
               fi
