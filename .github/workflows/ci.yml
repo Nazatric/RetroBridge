@@ -197,8 +197,17 @@ jobs:
             --package "system-images;android-35;google_apis;x86_64" --device pixel_2
           "$EMULATOR" -avd retrobridge-ci -no-window -no-audio \
             -no-boot-anim -no-snapshot -no-snapshot-save -gpu swiftshader_indirect -accel auto \
-            > diagnostics/emulator.log 2>&1 &
-          "$ADB" wait-for-device
+            -verbose -show-kernel > diagnostics/emulator.log 2>&1 &
+          EMULATOR_PID=$!
+          echo "Started Android emulator process $EMULATOR_PID"
+          if ! timeout 180 "$ADB" wait-for-device; then
+            echo "adb did not observe the emulator within 180 seconds." >&2
+            "$ADB" devices -l >&2 || true
+            ps -p "$EMULATOR_PID" -o pid=,stat=,args= >&2 || true
+            tail -n 200 diagnostics/emulator.log >&2 || true
+            exit 1
+          fi
+          "$ADB" devices -l
           booted=false
           for attempt in $(seq 1 90); do
             if [[ "$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]]; then
