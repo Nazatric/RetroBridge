@@ -2660,6 +2660,104 @@ void test_a32_t32_execution_svc_and_trampolines() {
     check(wide_thumb_result.status == ExecutionStatus::Completed && wide_thumb_state.r[0] == 0x00010028U,
         "T32 32-bit MOVW/MOVT instructions decode and execute");
 
+    std::vector<std::byte> arm_divide_program(24, std::byte{0});
+    put_u32(arm_divide_program, 0, 0xe712f110U);  // sdiv r2, r0, r1
+    put_u32(arm_divide_program, 4, 0xe733f110U);  // udiv r3, r0, r1
+    put_u32(arm_divide_program, 8, 0xe714f510U);  // sdiv r4, r0, r5
+    put_u32(arm_divide_program, 12, 0xe736f510U); // udiv r6, r0, r5
+    put_u32(arm_divide_program, 16, 0xe3a07001U); // mov r7, #1
+    put_u32(arm_divide_program, 20, 0xef000000U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x2600}, arm_divide_program, arm_divide_program.size(),
+            GuestPermission::Read | GuestPermission::Execute),
+        "A32 integer-division test code maps RX");
+    GuestCpuState32 arm_divide_state{};
+    arm_divide_state.r[0] = std::bit_cast<std::uint32_t>(std::int32_t{-41});
+    arm_divide_state.r[1] = 5;
+    arm_divide_state.r[5] = 0;
+    const auto arm_divide_result = interpreter.run(arm_divide_state, GuestAddress32{0x2600}, 32);
+    check(arm_divide_result.status == ExecutionStatus::Completed
+            && arm_divide_state.r[2] == std::bit_cast<std::uint32_t>(std::int32_t{-8})
+            && arm_divide_state.r[3] == (0xffffffffU - 40U) / 5U
+            && arm_divide_state.r[4] == 0 && arm_divide_state.r[6] == 0,
+        "A32 SDIV/UDIV truncate signed quotients toward zero and handle zero divisors deterministically");
+
+    std::vector<std::byte> thumb_divide_program(20, std::byte{0});
+    put_u16(thumb_divide_program, 0, 0xfb90U); // sdiv r2, r0, r1
+    put_u16(thumb_divide_program, 2, 0xf2f1U);
+    put_u16(thumb_divide_program, 4, 0xfbb0U); // udiv r3, r0, r1
+    put_u16(thumb_divide_program, 6, 0xf3f1U);
+    put_u16(thumb_divide_program, 8, 0xfb90U); // sdiv r4, r0, r5
+    put_u16(thumb_divide_program, 10, 0xf4f5U);
+    put_u16(thumb_divide_program, 12, 0xfbb0U); // udiv r6, r0, r5
+    put_u16(thumb_divide_program, 14, 0xf6f5U);
+    put_u16(thumb_divide_program, 16, 0x2701U); // movs r7, #1
+    put_u16(thumb_divide_program, 18, 0xdf00U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x2700}, thumb_divide_program, thumb_divide_program.size(),
+            GuestPermission::Read | GuestPermission::Execute),
+        "T32 integer-division test code maps RX");
+    GuestCpuState32 thumb_divide_state{};
+    thumb_divide_state.r[0] = std::bit_cast<std::uint32_t>(std::int32_t{-41});
+    thumb_divide_state.r[1] = 5;
+    thumb_divide_state.r[5] = 0;
+    const auto thumb_divide_result = interpreter.run(thumb_divide_state, GuestAddress32{0x2701}, 32);
+    check(thumb_divide_result.status == ExecutionStatus::Completed
+            && thumb_divide_state.r[2] == std::bit_cast<std::uint32_t>(std::int32_t{-8})
+            && thumb_divide_state.r[3] == (0xffffffffU - 40U) / 5U
+            && thumb_divide_state.r[4] == 0 && thumb_divide_state.r[6] == 0,
+        "T32 SDIV/UDIV share bounded signed and unsigned divide semantics");
+
+    std::vector<std::byte> thumb_reverse_program(10, std::byte{0});
+    put_u16(thumb_reverse_program, 0, 0xba02U); // rev r2, r0
+    put_u16(thumb_reverse_program, 2, 0xba43U); // rev16 r3, r0
+    put_u16(thumb_reverse_program, 4, 0xba84U); // rbit r4, r0
+    put_u16(thumb_reverse_program, 6, 0xbac5U); // revsh r5, r0
+    put_u16(thumb_reverse_program, 8, 0xdf00U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x2500}, thumb_reverse_program, thumb_reverse_program.size(),
+            GuestPermission::Read | GuestPermission::Execute),
+        "T16 byte-reversal test code maps RX");
+    GuestCpuState32 thumb_reverse_state{};
+    thumb_reverse_state.r[0] = 0x80ff1234U;
+    thumb_reverse_state.r[7] = 1;
+    thumb_reverse_state.cpsr |= 0xa0000000U;
+    std::uint32_t expected_rbit = 0;
+    for (unsigned bit = 0; bit < 32; ++bit) {
+        expected_rbit |= ((thumb_reverse_state.r[0] >> bit) & 1U) << (31U - bit);
+    }
+    const auto reverse_flags = thumb_reverse_state.cpsr & 0xf0000000U;
+    const auto thumb_reverse_result = interpreter.run(thumb_reverse_state, GuestAddress32{0x2501}, 16);
+    check(thumb_reverse_result.status == ExecutionStatus::Completed
+            && thumb_reverse_state.r[2] == 0x3412ff80U
+            && thumb_reverse_state.r[3] == 0xff803412U
+            && thumb_reverse_state.r[4] == expected_rbit
+            && thumb_reverse_state.r[5] == 0x00003412U
+            && (thumb_reverse_state.cpsr & 0xf0000000U) == reverse_flags,
+        "T16 REV/REV16/RBIT/REVSH operate on bytes without changing condition flags");
+
+    std::vector<std::byte> thumb_bitfield_program(18, std::byte{0});
+    put_u16(thumb_bitfield_program, 0, 0xf3c0U); // ubfx r2, r0, #8, #8
+    put_u16(thumb_bitfield_program, 2, 0x2207U);
+    put_u16(thumb_bitfield_program, 4, 0xf340U); // sbfx r3, r0, #8, #8
+    put_u16(thumb_bitfield_program, 6, 0x2307U);
+    put_u16(thumb_bitfield_program, 8, 0xf361U); // bfi r4, r1, #8, #8
+    put_u16(thumb_bitfield_program, 10, 0x240fU);
+    put_u16(thumb_bitfield_program, 12, 0xf36fU); // bfc r5, #4, #8
+    put_u16(thumb_bitfield_program, 14, 0x150bU);
+    put_u16(thumb_bitfield_program, 16, 0xdf00U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x2800}, thumb_bitfield_program, thumb_bitfield_program.size(),
+            GuestPermission::Read | GuestPermission::Execute),
+        "T32 bitfield test code maps RX");
+    GuestCpuState32 thumb_bitfield_state{};
+    thumb_bitfield_state.r[0] = 0x1234ff80U;
+    thumb_bitfield_state.r[1] = 0xa5U;
+    thumb_bitfield_state.r[4] = 0xdeadbeefU;
+    thumb_bitfield_state.r[5] = 0xffffffffU;
+    thumb_bitfield_state.r[7] = 1;
+    const auto thumb_bitfield_result = interpreter.run(thumb_bitfield_state, GuestAddress32{0x2801}, 16);
+    check(thumb_bitfield_result.status == ExecutionStatus::Completed
+            && thumb_bitfield_state.r[2] == 0xffU && thumb_bitfield_state.r[3] == 0xffffffffU
+            && thumb_bitfield_state.r[4] == 0xdeada5efU && thumb_bitfield_state.r[5] == 0xfffff00fU,
+        "T32 UBFX/SBFX sign-extend fields and BFI/BFC update only the selected bits");
+
     std::vector<std::byte> vfp_a32_program(20, std::byte{0});
     put_u32(vfp_a32_program, 0, 0xee000a10U);  // vmov s0, r0
     put_u32(vfp_a32_program, 4, 0xee001a90U);  // vmov s1, r1

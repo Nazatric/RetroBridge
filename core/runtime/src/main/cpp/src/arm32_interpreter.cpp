@@ -375,6 +375,37 @@ void write_vfp_double(GuestCpuState32& state, unsigned index, std::uint64_t valu
         return {};
     }
 
+    const auto division_encoding = instruction & 0x0ff0f0f0U;
+    if (division_encoding == 0x0710f010U || division_encoding == 0x0730f010U) {
+        const bool signed_division = division_encoding == 0x0710f010U;
+        const auto rd = (instruction >> 16U) & 0xfU;
+        const auto divisor_register = (instruction >> 8U) & 0xfU;
+        const auto dividend_register = instruction & 0xfU;
+        if (rd == 15U || divisor_register == 15U || dividend_register == 15U) {
+            return fault("A32 SDIV/UDIV using PC is unpredictable");
+        }
+        const auto divisor = state.r[divisor_register];
+        const auto dividend = state.r[dividend_register];
+        std::uint32_t quotient = 0;
+        // ARM leaves division by zero architecturally UNPREDICTABLE. Keep the
+        // interpreter deterministic and do not raise a host-language fault.
+        if (divisor != 0) {
+            if (signed_division) {
+                const auto signed_dividend = std::bit_cast<std::int32_t>(dividend);
+                const auto signed_divisor = std::bit_cast<std::int32_t>(divisor);
+                if (signed_dividend == std::numeric_limits<std::int32_t>::min() && signed_divisor == -1) {
+                    quotient = 0x80000000U;
+                } else {
+                    quotient = std::bit_cast<std::uint32_t>(static_cast<std::int32_t>(signed_dividend / signed_divisor));
+                }
+            } else {
+                quotient = dividend / divisor;
+            }
+        }
+        state.r[rd] = quotient;
+        return {};
+    }
+
     if ((instruction & 0x0fc000f0U) == 0x00000090U) {
         const auto rd = (instruction >> 16U) & 0xfU;
         const auto rn = (instruction >> 12U) & 0xfU;
@@ -573,6 +604,31 @@ void write_vfp_double(GuestCpuState32& state, unsigned index, std::uint64_t valu
     const GuestSvcHandler& svc_handler,
     std::uint32_t pc,
     std::uint16_t instruction) {
+    const auto reverse_opcode = instruction & 0xffc0U;
+    if (reverse_opcode == 0xba00U || reverse_opcode == 0xba40U
+        || reverse_opcode == 0xba80U || reverse_opcode == 0xbac0U) {
+        const auto rm = (instruction >> 3U) & 7U;
+        const auto rd = instruction & 7U;
+        const auto value = state.r[rm];
+        std::uint32_t result = 0;
+        if (reverse_opcode == 0xba00U) {
+            result = ((value & 0x000000ffU) << 24U) | ((value & 0x0000ff00U) << 8U)
+                | ((value & 0x00ff0000U) >> 8U) | ((value & 0xff000000U) >> 24U);
+        } else if (reverse_opcode == 0xba40U) {
+            result = ((value & 0x00ff00ffU) << 8U) | ((value & 0xff00ff00U) >> 8U);
+        } else if (reverse_opcode == 0xba80U) {
+            for (unsigned bit = 0; bit < 32; ++bit) {
+                result |= ((value >> bit) & 1U) << (31U - bit);
+            }
+        } else {
+            const auto low_halfword = static_cast<std::uint16_t>(((value & 0xffU) << 8U)
+                | ((value >> 8U) & 0xffU));
+            result = static_cast<std::uint32_t>(std::bit_cast<std::int16_t>(low_halfword));
+        }
+        state.r[rd] = result;
+        return {};
+    }
+
     if ((instruction & 0xff00U) == 0xbf00U) {
         const auto mask = instruction & 0x000fU;
         if (mask == 0) return {};
@@ -906,6 +962,64 @@ void write_vfp_double(GuestCpuState32& state, unsigned index, std::uint64_t valu
     std::uint16_t second) {
     const auto combined_instruction = (static_cast<std::uint32_t>(first) << 16U) | second;
     if (const auto vfp_result = execute_vfp_data(state, combined_instruction); vfp_result.has_value()) return *vfp_result;
+
+    const auto division_prefix = first & 0xfff0U;
+    if ((division_prefix == 0xfb90U || division_prefix == 0xfbb0U)
+        && (second & 0xf0f0U) == 0xf0f0U) {
+        const bool signed_division = division_prefix == 0xfb90U;
+        const auto rn = first & 0xfU;
+        const auto rd = (second >> 8U) & 0xfU;
+        const auto rm = second & 0xfU;
+        if (rn == 15U || rd == 15U || rm == 15U) return fault("T32 SDIV/UDIV using PC is unpredictable");
+        const auto divisor = state.r[rm];
+        const auto dividend = state.r[rn];
+        std::uint32_t quotient = 0;
+        // As in A32, deterministic zero is used for the architecturally
+        // UNPREDICTABLE divide-by-zero case.
+        if (divisor != 0) {
+            if (signed_division) {
+                const auto signed_dividend = std::bit_cast<std::int32_t>(dividend);
+                const auto signed_divisor = std::bit_cast<std::int32_t>(divisor);
+                if (signed_dividend == std::numeric_limits<std::int32_t>::min() && signed_divisor == -1) {
+                    quotient = 0x80000000U;
+                } else {
+                    quotient = std::bit_cast<std::uint32_t>(static_cast<std::int32_t>(signed_dividend / signed_divisor));
+                }
+            } else {
+                quotient = dividend / divisor;
+            }
+        }
+        state.r[rd] = quotient;
+        return {};
+    }
+
+    const auto bitfield_opcode = first & 0xfff0U;
+    if (bitfield_opcode == 0xf340U || bitfield_opcode == 0xf360U || bitfield_opcode == 0xf3c0U) {
+        const auto rn = first & 0xfU;
+        const auto rd = (second >> 8U) & 0xfU;
+        const auto lsb = (((second >> 12U) & 7U) << 2U) | ((second >> 6U) & 3U);
+        const auto encoded_width = second & 0x1fU;
+        if (rd == 15U || (second & 0x0020U) != 0) return fault("invalid T32 bitfield destination or reserved encoding");
+        if (bitfield_opcode == 0xf360U) {
+            if (encoded_width < lsb) return fault("T32 BFI/BFC msb is below lsb");
+            const auto width = encoded_width - lsb + 1U;
+            const auto mask = width == 32U ? 0xffffffffU : ((1U << width) - 1U) << lsb;
+            const auto source = rn == 15U ? 0U : state.r[rn];
+            state.r[rd] = (state.r[rd] & ~mask) | ((source << lsb) & mask);
+            return {};
+        }
+        if (rn == 15U) return fault("T32 UBFX/SBFX using PC is unpredictable");
+        const auto width = encoded_width + 1U;
+        if (lsb + width > 32U) return fault("T32 UBFX/SBFX field exceeds the register width");
+        const auto mask = width == 32U ? 0xffffffffU : (1U << width) - 1U;
+        const auto field = (state.r[rn] >> lsb) & mask;
+        if (bitfield_opcode == 0xf340U && width < 32U && (field & (1U << (width - 1U))) != 0) {
+            state.r[rd] = field | ~mask;
+        } else {
+            state.r[rd] = field;
+        }
+        return {};
+    }
 
     if (is_t32_movw(first, second, false) || is_t32_movw(first, second, true)) {
         const bool movt = is_t32_movw(first, second, true);
