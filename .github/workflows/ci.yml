@@ -171,18 +171,37 @@ jobs:
           set -euo pipefail
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           AVDMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
-          if [[ ! -x "$SDKMANAGER" ]]; then SDKMANAGER="$(command -v sdkmanager)"; fi
-          if [[ ! -x "$AVDMANAGER" ]]; then AVDMANAGER="$(command -v avdmanager)"; fi
-          "$SDKMANAGER" --install "emulator" "system-images;android-35;google_apis;x86_64"
+          if [[ ! -x "$SDKMANAGER" ]]; then SDKMANAGER="$(command -v sdkmanager || true)"; fi
+          if [[ ! -x "$AVDMANAGER" ]]; then AVDMANAGER="$(command -v avdmanager || true)"; fi
+          if [[ -z "$SDKMANAGER" || ! -x "$SDKMANAGER" ]]; then
+            echo "Android sdkmanager is unavailable under $ANDROID_HOME or PATH." >&2
+            find "$ANDROID_HOME/cmdline-tools" -maxdepth 4 -type f -name sdkmanager -print >&2 || true
+            exit 127
+          fi
+          if [[ -z "$AVDMANAGER" || ! -x "$AVDMANAGER" ]]; then
+            echo "Android avdmanager is unavailable under $ANDROID_HOME or PATH." >&2
+            find "$ANDROID_HOME/cmdline-tools" -maxdepth 4 -type f -name avdmanager -print >&2 || true
+            exit 127
+          fi
+          "$SDKMANAGER" --install "platform-tools" "emulator" "system-images;android-35;google_apis;x86_64"
+          ADB="$ANDROID_HOME/platform-tools/adb"
+          EMULATOR="$ANDROID_HOME/emulator/emulator"
+          if [[ ! -x "$ADB" || ! -x "$EMULATOR" ]]; then
+            echo "Android platform-tools or emulator package did not install the expected executables." >&2
+            ls -la "$ANDROID_HOME/platform-tools" "$ANDROID_HOME/emulator" >&2 || true
+            exit 127
+          fi
+          echo "Using sdkmanager=$SDKMANAGER avdmanager=$AVDMANAGER adb=$ADB emulator=$EMULATOR"
+          export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
           echo no | "$AVDMANAGER" create avd --force --name retrobridge-ci \
             --package "system-images;android-35;google_apis;x86_64" --device pixel_2
-          "$ANDROID_HOME/emulator/emulator" -avd retrobridge-ci -no-window -no-audio \
+          "$EMULATOR" -avd retrobridge-ci -no-window -no-audio \
             -no-boot-anim -no-snapshot -no-snapshot-save -gpu swiftshader_indirect -accel auto \
             > diagnostics/emulator.log 2>&1 &
-          adb wait-for-device
+          "$ADB" wait-for-device
           booted=false
           for attempt in $(seq 1 90); do
-            if [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]]; then
+            if [[ "$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]]; then
               booted=true
               break
             fi
@@ -193,10 +212,10 @@ jobs:
             tail -n 120 diagnostics/emulator.log >&2 || true
             exit 1
           fi
-          adb shell settings put global window_animation_scale 0
-          adb shell settings put global transition_animation_scale 0
-          adb shell settings put global animator_duration_scale 0
-          adb shell input keyevent 82
+          "$ADB" shell settings put global window_animation_scale 0
+          "$ADB" shell settings put global transition_animation_scale 0
+          "$ADB" shell settings put global animator_duration_scale 0
+          "$ADB" shell input keyevent 82
 
       - name: Run signed ARM32 demo APK through guest_runtime on emulator
         shell: bash
