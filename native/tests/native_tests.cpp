@@ -2873,6 +2873,64 @@ void test_a32_t32_execution_svc_and_trampolines() {
             && stored_halfword.has_value() && *stored_halfword == 0x1234U,
         "T32 pre/post-indexed word, halfword, and signed-byte transfers apply writeback and bounds checks");
 
+    check(memory.map_zeroed(GuestAddress32{0xa000}, 0x1000,
+            GuestPermission::Read | GuestPermission::Write),
+        "T32 multiple-transfer stack region maps read/write");
+    std::vector<std::byte> thumb_stmdb_program(8, std::byte{0});
+    put_u16(thumb_stmdb_program, 0, 0xe92dU); // stmdb sp!, {r4, r8, lr}
+    put_u16(thumb_stmdb_program, 2, 0x4110U);
+    put_u16(thumb_stmdb_program, 4, 0x2701U); // movs r7, #1
+    put_u16(thumb_stmdb_program, 6, 0xdf00U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x3300}, thumb_stmdb_program, thumb_stmdb_program.size(),
+            GuestPermission::Read | GuestPermission::Execute),
+        "T32 STMDB test code maps RX");
+    GuestCpuState32 thumb_stmdb_state{};
+    thumb_stmdb_state.r[13] = 0xa100U;
+    thumb_stmdb_state.r[4] = 0x44444444U;
+    thumb_stmdb_state.r[8] = 0x88888888U;
+    thumb_stmdb_state.r[14] = 0xeeeeeeeeU;
+    const auto thumb_stmdb_result = interpreter.run(thumb_stmdb_state, GuestAddress32{0x3301}, 8);
+    check(thumb_stmdb_result.status == ExecutionStatus::Completed && thumb_stmdb_state.r[13] == 0xa0f4U
+            && memory.read_u32(GuestAddress32{0xa0f4}).value_or(0) == 0x44444444U
+            && memory.read_u32(GuestAddress32{0xa0f8}).value_or(0) == 0x88888888U
+            && memory.read_u32(GuestAddress32{0xa0fc}).value_or(0) == 0xeeeeeeeeU,
+        "T32 STMDB stores high registers in ascending register order and writes back the stack pointer");
+
+    std::vector<std::byte> thumb_ldmia_program(8, std::byte{0});
+    put_u16(thumb_ldmia_program, 0, 0xe8bdU); // ldmia sp!, {r4, r8, lr}
+    put_u16(thumb_ldmia_program, 2, 0x4110U);
+    put_u16(thumb_ldmia_program, 4, 0x2701U); // movs r7, #1
+    put_u16(thumb_ldmia_program, 6, 0xdf00U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x3340}, thumb_ldmia_program, thumb_ldmia_program.size(),
+            GuestPermission::Read | GuestPermission::Execute),
+        "T32 LDMIA test code maps RX");
+    GuestCpuState32 thumb_ldmia_state{};
+    thumb_ldmia_state.r[13] = 0xa0f4U;
+    const auto thumb_ldmia_result = interpreter.run(thumb_ldmia_state, GuestAddress32{0x3341}, 8);
+    check(thumb_ldmia_result.status == ExecutionStatus::Completed && thumb_ldmia_state.r[13] == 0xa100U
+            && thumb_ldmia_state.r[4] == 0x44444444U && thumb_ldmia_state.r[8] == 0x88888888U
+            && thumb_ldmia_state.r[14] == 0xeeeeeeeeU,
+        "T32 LDMIA restores high registers and applies writeback");
+
+    std::vector<std::byte> thumb_pop_pc_program(8, std::byte{0});
+    put_u16(thumb_pop_pc_program, 0, 0xe8bdU); // ldmia sp!, {r4, r8, pc}
+    put_u16(thumb_pop_pc_program, 2, 0x8110U);
+    put_u16(thumb_pop_pc_program, 4, 0x2701U); // movs r7, #1 -- loaded PC target
+    put_u16(thumb_pop_pc_program, 6, 0xdf00U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x3380}, thumb_pop_pc_program, thumb_pop_pc_program.size(),
+            GuestPermission::Read | GuestPermission::Execute),
+        "T32 LDMIA-to-PC test code maps RX");
+    check(memory.write_u32(GuestAddress32{0xa080}, 0x44444444U)
+            && memory.write_u32(GuestAddress32{0xa084}, 0x88888888U)
+            && memory.write_u32(GuestAddress32{0xa088}, 0x3385U),
+        "T32 LDMIA-to-PC stack frame is staged");
+    GuestCpuState32 thumb_pop_pc_state{};
+    thumb_pop_pc_state.r[13] = 0xa080U;
+    const auto thumb_pop_pc_result = interpreter.run(thumb_pop_pc_state, GuestAddress32{0x3381}, 8);
+    check(thumb_pop_pc_result.status == ExecutionStatus::Completed && thumb_pop_pc_state.r[13] == 0xa08cU
+            && thumb_pop_pc_state.r[4] == 0x44444444U && thumb_pop_pc_state.r[8] == 0x88888888U,
+        "T32 LDMIA loading PC returns through the Thumb target after restoring high registers");
+
     std::vector<std::byte> thumb_table(8, std::byte{0});
     thumb_table[1] = static_cast<std::byte>(6U);
     put_u16(thumb_table, 4, 6U);

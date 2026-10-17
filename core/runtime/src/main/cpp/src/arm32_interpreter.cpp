@@ -1127,6 +1127,74 @@ void write_vfp_double(GuestCpuState32& state, unsigned index, std::uint64_t valu
         return {};
     }
 
+    if ((first & 0xfe40U) == 0xe800U) {
+        const bool pre_index = (first & 0x0100U) != 0;
+        const bool increment = (first & 0x0080U) != 0;
+        const bool user_registers = (first & 0x0040U) != 0;
+        const bool writeback = (first & 0x0020U) != 0;
+        const bool load = (first & 0x0010U) != 0;
+        const auto base_register = first & 0x000fU;
+        const auto register_list = second;
+        const auto register_count = static_cast<std::uint64_t>(std::popcount(register_list));
+        if (register_count == 0) return fault("empty T32 LDM/STM register list is unsupported");
+        if (user_registers) return fault("T32 LDM/STM user-register or exception-return forms are unsupported");
+        if (base_register == 15U) return fault("T32 LDM/STM using PC as the base is unsupported");
+        if (!load && (register_list & (1U << 15U)) != 0) {
+            return fault("T32 STM with PC in the register list is unpredictable");
+        }
+        if (writeback && (register_list & (1U << base_register)) != 0) {
+            return fault("T32 LDM/STM writeback with the base register in the register list is unsupported");
+        }
+        const auto base = state.r[base_register];
+        if ((base & 3U) != 0) return fault("T32 LDM/STM base address is not word-aligned");
+
+        const auto transfer_bytes = register_count * 4U;
+        const auto start = increment
+            ? static_cast<std::uint64_t>(base) + (pre_index ? 4U : 0U)
+            : static_cast<std::uint64_t>(base) - transfer_bytes + (pre_index ? 0U : 4U);
+        const auto writeback_value = increment
+            ? static_cast<std::uint64_t>(base) + transfer_bytes
+            : static_cast<std::uint64_t>(base) - transfer_bytes;
+        const auto address_space_end = static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) + 1U;
+        if (start > std::numeric_limits<std::uint32_t>::max() || start + transfer_bytes > address_space_end
+            || (writeback && writeback_value > std::numeric_limits<std::uint32_t>::max())) {
+            return fault("T32 LDM/STM address range wraps the 32-bit guest address space");
+        }
+        const auto access = load ? GuestPermission::Read : GuestPermission::Write;
+        if (!memory.is_accessible(GuestAddress32{static_cast<std::uint32_t>(start)}, transfer_bytes, access)) {
+            return fault(load ? "T32 LDM accessed unreadable guest memory" : "T32 STM accessed read-only guest memory");
+        }
+
+        std::array<std::uint32_t, 16> loaded_registers{};
+        std::optional<std::uint32_t> loaded_pc;
+        auto address = static_cast<std::uint32_t>(start);
+        for (unsigned reg = 0; reg < 16; ++reg) {
+            if ((register_list & (1U << reg)) == 0) continue;
+            if (load) {
+                const auto value = memory.read_u32(GuestAddress32{address});
+                if (!value.has_value()) return fault("T32 LDM read failed after guest-range validation");
+                if (reg == 15U) loaded_pc = *value;
+                else loaded_registers[reg] = *value;
+            } else if (!memory.write_u32(GuestAddress32{address}, state.r[reg])) {
+                return fault("T32 STM write failed after guest-range validation");
+            }
+            address += 4U;
+        }
+        if (load) {
+            for (unsigned reg = 0; reg < 15; ++reg) {
+                if ((register_list & (1U << reg)) != 0) state.r[reg] = loaded_registers[reg];
+            }
+            if (writeback) state.r[base_register] = static_cast<std::uint32_t>(writeback_value);
+            if (loaded_pc.has_value()) {
+                branch_exchange(state, *loaded_pc);
+                state.thumb_it_state = 0;
+            }
+        } else if (writeback) {
+            state.r[base_register] = static_cast<std::uint32_t>(writeback_value);
+        }
+        return {};
+    }
+
     const auto first_opcode = first & 0xfff0U;
     const auto rd = (second >> 12U) & 0xfU;
     const auto rn = first & 0xfU;
