@@ -264,7 +264,10 @@ void write_vfp_double(GuestCpuState32& state, unsigned index, std::uint64_t valu
     const bool double_precision = encoded == 0x0e000b00U;
     if (!single_precision && !double_precision) return std::nullopt;
 
-    const auto operation = (instruction >> 20U) & 0xfU;
+    // Bit 22 extends Vd (S or D register number); it is not part of the
+    // scalar arithmetic opcode. Masking it lets odd/high destination registers
+    // select the same operation as their neighboring even registers.
+    const auto operation = ((instruction >> 20U) & 0xfU) & ~0x4U;
     const auto modifier = (instruction >> 6U) & 3U;
     enum class Arithmetic { Add, Subtract, Multiply, Divide };
     Arithmetic arithmetic{};
