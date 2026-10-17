@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <fcntl.h>
 #include <jni.h>
 #include <math.h>
@@ -24,12 +25,12 @@ static int square_root_matches(uint32_t input_bits, uint32_t expected_bits) {
 
 static int append_line(const char* line, size_t length) {
     const int descriptor = open(kDemoPath, O_WRONLY | O_CREAT | O_APPEND, 0600);
-    if (descriptor < 0) return -10;
+    if (descriptor < 0) return -1000 - errno;
     const ssize_t written = write(descriptor, line, length);
-    const int write_status = written == (ssize_t)length ? 0 : -20;
+    const int write_status = written == (ssize_t)length ? 0 : -2000 - errno;
     const int close_status = close(descriptor);
     if (write_status != 0) return write_status;
-    return close_status == 0 ? 0 : -30;
+    return close_status == 0 ? 0 : -3000 - errno;
 }
 
 __attribute__((constructor)) static void retrobridge_demo_constructor(void) {
