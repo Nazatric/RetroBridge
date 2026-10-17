@@ -116,8 +116,12 @@ jobs:
             | tee diagnostics/arm32-vfp-disassembly.log
           gradle --no-daemon --stacktrace --console=plain :guestDemo:assembleDebug 2>&1 \
             | tee diagnostics/demo-apk.log
-          DEMO_APK="guestDemo/build/outputs/apk/debug/guestDemo-debug.apk"
-          test -s "$DEMO_APK"
+          DEMO_APK="$(find native/fixtures/demo-apk/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          if [[ -z "$DEMO_APK" || ! -s "$DEMO_APK" ]]; then
+            echo "Gradle did not produce the demo APK under native/fixtures/demo-apk/build/outputs/apk/debug." >&2
+            find native/fixtures/demo-apk/build/outputs -maxdepth 4 -type f -print >&2 || true
+            exit 1
+          fi
           "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -v 4 "$DEMO_APK" \
             | tee diagnostics/demo-apk-zipalign.log
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose "$DEMO_APK" \
@@ -240,7 +244,7 @@ jobs:
           path: |
             app/build/outputs/apk/debug/*.apk
             app/build/outputs/apk/androidTest/debug/*.apk
-            guestDemo/build/outputs/apk/debug/*.apk
+            native/fixtures/demo-apk/build/outputs/apk/debug/*.apk
             native/build/arm32-fixtures/*
             native/build/arm32-fixtures/test-assets/*.apk
             native/build/host/retrobridge_native_tests
