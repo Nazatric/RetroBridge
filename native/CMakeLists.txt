@@ -24,6 +24,10 @@ add_executable(retrobridge_arm32_benchmark tools/arm32_interpreter_benchmark.cpp
 target_link_libraries(retrobridge_arm32_benchmark PRIVATE retrobridge_runtime)
 target_compile_options(retrobridge_arm32_benchmark PRIVATE -Wall -Wextra -Wpedantic)
 
+add_executable(retrobridge_native_session_demo_runner tools/native_session_demo_runner.cpp)
+target_link_libraries(retrobridge_native_session_demo_runner PRIVATE retrobridge_runtime)
+target_compile_options(retrobridge_native_session_demo_runner PRIVATE -Wall -Wextra -Wpedantic)
+
 add_test(NAME native_core COMMAND retrobridge_native_tests)
 
 if(RETROBRIDGE_ARM32_VFP_EXECUTABLE)
@@ -48,6 +52,17 @@ if(RETROBRIDGE_ARM32_EXECUTABLE)
         NAME arm32_guest_executable_execution
         COMMAND retrobridge_arm32_fixture_runner "${RETROBRIDGE_ARM32_EXECUTABLE}"
     )
+endif()
+
+if(RETROBRIDGE_ARM32_DEMO_SHARED_LIBRARY)
+    if(NOT EXISTS "${RETROBRIDGE_ARM32_DEMO_SHARED_LIBRARY}")
+        message(FATAL_ERROR "RETROBRIDGE_ARM32_DEMO_SHARED_LIBRARY does not exist: ${RETROBRIDGE_ARM32_DEMO_SHARED_LIBRARY}")
+    endif()
+    add_test(
+        NAME arm32_native_shared_library_lifecycle
+        COMMAND retrobridge_native_session_demo_runner "${RETROBRIDGE_ARM32_DEMO_SHARED_LIBRARY}"
+    )
+    set_tests_properties(arm32_native_shared_library_lifecycle PROPERTIES TIMEOUT 45)
 endif()
 
 if(RETROBRIDGE_ARM32_SHARED_LIBRARY)

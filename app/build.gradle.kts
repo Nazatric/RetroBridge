@@ -14,14 +14,19 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0-prototype"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
-            abiFilters += "arm64-v8a"
+            abiFilters += listOf("arm64-v8a", "x86_64")
         }
     }
 
     buildFeatures {
         compose = true
     }
+
+    sourceSets.getByName("androidTest").assets.srcDir(
+        rootProject.layout.projectDirectory.dir("native/build/arm32-fixtures/test-assets"),
+    )
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -49,4 +54,7 @@ dependencies {
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:rules:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }

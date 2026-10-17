@@ -17,7 +17,7 @@ jobs:
   build-and-test:
     name: Android, native host, and ARM32 fixtures
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - name: Check out source
         uses: actions/checkout@v5
@@ -62,7 +62,7 @@ jobs:
             native/build/host
             native/build/arm32-fixtures
             core/runtime/.cxx
-          key: ${{ runner.os }}-retrobridge-cmake-${{ hashFiles('native/CMakeLists.txt', 'native/**/*.cpp', 'native/**/*.c', 'core/runtime/src/main/cpp/**') }}
+          key: ${{ runner.os }}-retrobridge-cmake-${{ hashFiles('native/CMakeLists.txt', 'native/**/*.cpp', 'native/**/*.c', 'native/fixtures/**/*.gradle.kts', 'app/**/*.gradle.kts', 'core/runtime/src/main/cpp/**') }}
           restore-keys: |
             ${{ runner.os }}-retrobridge-cmake-
 
@@ -78,7 +78,7 @@ jobs:
           yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
           "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0" "cmake;3.22.1"
 
-      - name: Cross-compile ARM32 executable and shared-library fixtures
+      - name: Cross-compile ARM32 fixtures and package signed demo APK
         shell: bash
         run: |
           set -euo pipefail
@@ -95,14 +95,34 @@ jobs:
             -Wl,-soname,libretrobridge_fixture.so -Wl,--build-id=none -Wl,--no-as-needed \
             native/fixtures/arm32_shared_fixture.c \
             -o native/build/arm32-fixtures/libretrobridge_fixture.so
+          "$CC" -marm -O2 -fPIC -shared \
+            -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables \
+            -Wl,-soname,libretrobridge_demo.so -Wl,--build-id=none -Wl,--no-as-needed \
+            -Wl,--pack-dyn-relocs=none -Wl,--no-undefined \
+            native/fixtures/arm32_native_demo.c -lc -lm \
+            -o native/build/arm32-fixtures/libretrobridge_demo.so
           "$CC" -marm -mfpu=vfpv3-d16 -mfloat-abi=softfp -fPIE -pie -nostdlib \
             -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables \
             -Wl,-e,_start -Wl,--build-id=none \
             native/fixtures/arm32_vfp_guest.S \
             -o native/build/arm32-fixtures/guest_arm32_vfp
+          mkdir -p native/build/arm32-fixtures/demo-jni-libs/armeabi-v7a native/build/arm32-fixtures/test-assets
+          cp native/build/arm32-fixtures/libretrobridge_demo.so \
+            native/build/arm32-fixtures/demo-jni-libs/armeabi-v7a/libretrobridge_demo.so
           file native/build/arm32-fixtures/* | tee diagnostics/arm32-fixtures.log
+          "$NDK_BIN/llvm-readelf" -d native/build/arm32-fixtures/libretrobridge_demo.so \
+            | tee diagnostics/arm32-demo-dynamic-dependencies.log
           "$NDK_BIN/llvm-objdump" -d native/build/arm32-fixtures/guest_arm32_vfp \
             | tee diagnostics/arm32-vfp-disassembly.log
+          gradle --no-daemon --stacktrace --console=plain :guestDemo:assembleDebug 2>&1 \
+            | tee diagnostics/demo-apk.log
+          DEMO_APK="guestDemo/build/outputs/apk/debug/guestDemo-debug.apk"
+          test -s "$DEMO_APK"
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -v 4 "$DEMO_APK" \
+            | tee diagnostics/demo-apk-zipalign.log
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose "$DEMO_APK" \
+            | tee diagnostics/demo-apk-signature.log
+          cp "$DEMO_APK" native/build/arm32-fixtures/test-assets/guestdemo.apk
 
       - name: Configure and build native host verification
         shell: bash
@@ -112,7 +132,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DRETROBRIDGE_ARM32_EXECUTABLE="$GITHUB_WORKSPACE/native/build/arm32-fixtures/guest_arm32" \
             -DRETROBRIDGE_ARM32_VFP_EXECUTABLE="$GITHUB_WORKSPACE/native/build/arm32-fixtures/guest_arm32_vfp" \
-            -DRETROBRIDGE_ARM32_SHARED_LIBRARY="$GITHUB_WORKSPACE/native/build/arm32-fixtures/libretrobridge_fixture.so"
+            -DRETROBRIDGE_ARM32_SHARED_LIBRARY="$GITHUB_WORKSPACE/native/build/arm32-fixtures/libretrobridge_fixture.so" \
+            -DRETROBRIDGE_ARM32_DEMO_SHARED_LIBRARY="$GITHUB_WORKSPACE/native/build/arm32-fixtures/libretrobridge_demo.so"
           cmake --build native/build/host --parallel 2 2>&1 | tee diagnostics/native-build.log
           ctest --test-dir native/build/host --output-on-failure 2>&1 | tee diagnostics/ctest.log
 
@@ -123,12 +144,13 @@ jobs:
           native/build/host/retrobridge_arm32_benchmark 2000000 \
             | tee diagnostics/arm32-interpreter-benchmark.json
 
-      - name: Build arm64-v8a app and run Gradle unit tests
+      - name: Build Android app and instrumentation APK; run Gradle unit tests
         shell: bash
         run: |
           set -euo pipefail
           gradle --no-daemon --stacktrace --console=plain \
             :app:assembleDebug \
+            :app:assembleDebugAndroidTest \
             :app:lintDebug \
             :core:runtime:lintDebug \
             :app:testDebugUnitTest \
@@ -137,12 +159,52 @@ jobs:
             :core:fs:test \
             :core:services:test 2>&1 | tee diagnostics/gradle.log
 
+      - name: Install and boot Android x86_64 emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          AVDMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
+          if [[ ! -x "$SDKMANAGER" ]]; then SDKMANAGER="$(command -v sdkmanager)"; fi
+          if [[ ! -x "$AVDMANAGER" ]]; then AVDMANAGER="$(command -v avdmanager)"; fi
+          "$SDKMANAGER" --install "emulator" "system-images;android-35;google_apis;x86_64"
+          echo no | "$AVDMANAGER" create avd --force --name retrobridge-ci \
+            --package "system-images;android-35;google_apis;x86_64" --device pixel_2
+          "$ANDROID_HOME/emulator/emulator" -avd retrobridge-ci -no-window -no-audio \
+            -no-boot-anim -no-snapshot -no-snapshot-save -gpu swiftshader_indirect -accel auto \
+            > diagnostics/emulator.log 2>&1 &
+          adb wait-for-device
+          booted=false
+          for attempt in $(seq 1 90); do
+            if [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]]; then
+              booted=true
+              break
+            fi
+            sleep 5
+          done
+          if [[ "$booted" != true ]]; then
+            echo "Android emulator did not finish booting." >&2
+            tail -n 120 diagnostics/emulator.log >&2 || true
+            exit 1
+          fi
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
+          adb shell input keyevent 82
+
+      - name: Run signed ARM32 demo APK through guest_runtime on emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --stacktrace --console=plain \
+            :app:connectedDebugAndroidTest 2>&1 | tee diagnostics/emulator-instrumentation.log
+
       - name: Surface failure diagnostic tails
         if: failure()
         shell: bash
         run: |
           set -euo pipefail
-          for log in diagnostics/gradle.log diagnostics/ctest.log diagnostics/native-build.log diagnostics/arm32-fixtures.log diagnostics/arm32-vfp-disassembly.log diagnostics/arm32-interpreter-benchmark.json; do
+          for log in diagnostics/gradle.log diagnostics/demo-apk.log diagnostics/ctest.log diagnostics/native-build.log diagnostics/arm32-fixtures.log diagnostics/arm32-demo-dynamic-dependencies.log diagnostics/arm32-vfp-disassembly.log diagnostics/arm32-interpreter-benchmark.json diagnostics/demo-apk-zipalign.log diagnostics/demo-apk-signature.log diagnostics/emulator.log diagnostics/emulator-instrumentation.log; do
             if [[ -s "$log" ]]; then
               echo "### $log (last 100 lines)" >> "$GITHUB_STEP_SUMMARY"
               echo '```text' >> "$GITHUB_STEP_SUMMARY"
@@ -177,13 +239,18 @@ jobs:
           if-no-files-found: warn
           path: |
             app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/androidTest/debug/*.apk
+            guestDemo/build/outputs/apk/debug/*.apk
             native/build/arm32-fixtures/*
+            native/build/arm32-fixtures/test-assets/*.apk
             native/build/host/retrobridge_native_tests
             native/build/host/retrobridge_elf_inspect
             native/build/host/retrobridge_arm32_fixture_runner
+            native/build/host/retrobridge_native_session_demo_runner
             native/build/host/retrobridge_arm32_benchmark
             native/build/host/Testing/Temporary/LastTest.log
             diagnostics/*.log
             diagnostics/arm32-interpreter-benchmark.json
             **/build/test-results/**/*.xml
             **/build/reports/tests/**
+            **/build/outputs/androidTest-results/connected/**
