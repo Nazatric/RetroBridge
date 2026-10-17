@@ -629,6 +629,19 @@ void write_vfp_double(GuestCpuState32& state, unsigned index, std::uint64_t valu
         return {};
     }
 
+    if ((instruction & 0xf500U) == 0xb100U) {
+        const bool branch_if_nonzero = (instruction & 0x0800U) != 0;
+        const auto rn = instruction & 7U;
+        const auto immediate = (((instruction >> 9U) & 1U) << 6U)
+            | (((instruction >> 3U) & 0x1fU) << 1U);
+        const bool should_branch = (state.r[rn] != 0) == branch_if_nonzero;
+        if (should_branch) {
+            state.r[15] = pc + 4U + immediate;
+            state.thumb_it_state = 0;
+        }
+        return {};
+    }
+
     if ((instruction & 0xff00U) == 0xbf00U) {
         const auto mask = instruction & 0x000fU;
         if (mask == 0) return {};
@@ -996,6 +1009,18 @@ void write_vfp_double(GuestCpuState32& state, unsigned index, std::uint64_t valu
         return {};
     }
 
+    const auto add_sub_w_opcode = first & 0xfbe0U;
+    if (add_sub_w_opcode == 0xf200U || add_sub_w_opcode == 0xf2a0U) {
+        const auto rn = first & 0xfU;
+        const auto rd = (second >> 8U) & 0xfU;
+        if (rd == 15U || (second & 0x8000U) != 0) return fault("invalid T32 ADDW/SUBW destination or encoding");
+        const auto immediate = (((first >> 10U) & 1U) << 11U)
+            | (((second >> 12U) & 7U) << 8U) | (second & 0xffU);
+        const auto base = thumb_register(state, rn, pc);
+        state.r[rd] = add_sub_w_opcode == 0xf200U ? base + immediate : base - immediate;
+        return {};
+    }
+
     const auto division_prefix = first & 0xfff0U;
     if ((division_prefix == 0xfb90U || division_prefix == 0xfbb0U)
         && (second & 0xf0f0U) == 0xf0f0U) {
@@ -1061,6 +1086,23 @@ void write_vfp_double(GuestCpuState32& state, unsigned index, std::uint64_t valu
         const auto immediate = static_cast<std::uint32_t>(decode_t32_mov_immediate(first, second));
         if (movt) state.r[rd] = (state.r[rd] & 0x0000ffffU) | (immediate << 16U);
         else state.r[rd] = (state.r[rd] & 0xffff0000U) | immediate;
+        return {};
+    }
+
+    if ((first & 0xf800U) == 0xf000U && (second & 0xd000U) == 0x8000U) {
+        const auto condition = (first >> 6U) & 0xfU;
+        if (condition >= 0xeU) return fault("invalid T32 conditional branch condition");
+        if (condition_passed(state.cpsr, condition)) {
+            const auto s = static_cast<std::uint32_t>((first >> 10U) & 1U);
+            const auto j1 = static_cast<std::uint32_t>((second >> 13U) & 1U);
+            const auto j2 = static_cast<std::uint32_t>((second >> 11U) & 1U);
+            const auto encoded = (s << 20U) | (j1 << 19U) | (j2 << 18U)
+                | (static_cast<std::uint32_t>(first & 0x003fU) << 12U)
+                | (static_cast<std::uint32_t>(second & 0x07ffU) << 1U);
+            const auto displacement = sign_extend(encoded, 21U);
+            state.r[15] = static_cast<std::uint32_t>(static_cast<std::int64_t>(pc + 4U) + displacement) & ~1U;
+            state.thumb_it_state = 0;
+        }
         return {};
     }
 

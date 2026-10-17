@@ -2758,6 +2758,82 @@ void test_a32_t32_execution_svc_and_trampolines() {
             && thumb_bitfield_state.r[4] == 0xdeada5efU && thumb_bitfield_state.r[5] == 0xfffff00fU,
         "T32 UBFX/SBFX sign-extend fields and BFI/BFC update only the selected bits");
 
+    std::vector<std::byte> thumb_cb_program(14, std::byte{0});
+    put_u16(thumb_cb_program, 0, 0xb110U); // cbz r0, target
+    put_u16(thumb_cb_program, 2, 0x4611U); // mov r1, r2 (fall-through)
+    put_u16(thumb_cb_program, 4, 0xe002U); // b after the conditional slot
+    put_u16(thumb_cb_program, 8, 0x4619U); // mov r1, r3 (CBZ/CBNZ target)
+    put_u16(thumb_cb_program, 10, 0xbf00U); // nop
+    put_u16(thumb_cb_program, 12, 0xdf00U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x2d00}, thumb_cb_program, thumb_cb_program.size(),
+            GuestPermission::Read | GuestPermission::Execute),
+        "T16 CBZ/CBNZ test code maps RX");
+    const auto make_cb_state = [](std::uint32_t r0) {
+        GuestCpuState32 state{};
+        state.r[0] = r0;
+        state.r[2] = 1U;
+        state.r[3] = 2U;
+        state.r[7] = 1U;
+        state.cpsr |= 0xa0000000U;
+        return state;
+    };
+    auto cbz_taken_state = make_cb_state(0U);
+    const auto cbz_taken_flags = cbz_taken_state.cpsr & 0xf0000000U;
+    const auto cbz_taken_result = interpreter.run(cbz_taken_state, GuestAddress32{0x2d01}, 16);
+    auto cbz_not_taken_state = make_cb_state(1U);
+    const auto cbz_not_taken_result = interpreter.run(cbz_not_taken_state, GuestAddress32{0x2d01}, 16);
+    put_u16(thumb_cb_program, 0, 0xb910U); // cbnz r0, target
+    check(memory.map_bytes(GuestAddress32{0x2d20}, thumb_cb_program, thumb_cb_program.size(),
+            GuestPermission::Read | GuestPermission::Execute),
+        "T16 CBNZ encoding maps RX");
+    auto cbnz_taken_state = make_cb_state(1U);
+    const auto cbnz_taken_result = interpreter.run(cbnz_taken_state, GuestAddress32{0x2d21}, 16);
+    auto cbnz_not_taken_state = make_cb_state(0U);
+    const auto cbnz_not_taken_result = interpreter.run(cbnz_not_taken_state, GuestAddress32{0x2d21}, 16);
+    check(cbz_taken_result.status == ExecutionStatus::Completed && cbz_taken_state.r[1] == 2U
+            && cbz_not_taken_result.status == ExecutionStatus::Completed && cbz_not_taken_state.r[1] == 1U
+            && cbnz_taken_result.status == ExecutionStatus::Completed && cbnz_taken_state.r[1] == 2U
+            && cbnz_not_taken_result.status == ExecutionStatus::Completed && cbnz_not_taken_state.r[1] == 1U
+            && (cbz_taken_state.cpsr & 0xf0000000U) == cbz_taken_flags,
+        "T16 CBZ/CBNZ branch forward on register value without consuming or changing APSR flags");
+
+    std::vector<std::byte> thumb_add_sub_w_program(12, std::byte{0});
+    put_u16(thumb_add_sub_w_program, 0, 0xf200U); // addw r2, r0, #0x345
+    put_u16(thumb_add_sub_w_program, 2, 0x3245U);
+    put_u16(thumb_add_sub_w_program, 4, 0xf2a2U); // subw r3, r2, #0x45
+    put_u16(thumb_add_sub_w_program, 6, 0x0345U);
+    put_u16(thumb_add_sub_w_program, 8, 0x2701U); // movs r7, #1
+    put_u16(thumb_add_sub_w_program, 10, 0xdf00U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x2e00}, thumb_add_sub_w_program, thumb_add_sub_w_program.size(),
+            GuestPermission::Read | GuestPermission::Execute),
+        "T32 ADDW/SUBW test code maps RX");
+    GuestCpuState32 add_sub_w_state{};
+    add_sub_w_state.r[0] = 0x1000U;
+    const auto add_sub_w_result = interpreter.run(add_sub_w_state, GuestAddress32{0x2e01}, 16);
+    check(add_sub_w_result.status == ExecutionStatus::Completed
+            && add_sub_w_state.r[2] == 0x1345U && add_sub_w_state.r[3] == 0x1300U,
+        "T32 ADDW/SUBW combine split immediates without modifying flags");
+
+    std::vector<std::byte> thumb_cond_branch_program(14, std::byte{0});
+    put_u16(thumb_cond_branch_program, 0, 0xf040U); // bne.w +4
+    put_u16(thumb_cond_branch_program, 2, 0x8002U);
+    put_u16(thumb_cond_branch_program, 4, 0x2001U); // movs r0, #1 (Z path)
+    put_u16(thumb_cond_branch_program, 6, 0xe000U); // b.n +0, skip the NE target
+    put_u16(thumb_cond_branch_program, 8, 0x2002U); // movs r0, #2 (NE target)
+    put_u16(thumb_cond_branch_program, 10, 0x2701U); // movs r7, #1
+    put_u16(thumb_cond_branch_program, 12, 0xdf00U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x2f00}, thumb_cond_branch_program, thumb_cond_branch_program.size(),
+            GuestPermission::Read | GuestPermission::Execute),
+        "T32 conditional branch test code maps RX");
+    GuestCpuState32 branch_ne_state{};
+    const auto branch_ne_result = interpreter.run(branch_ne_state, GuestAddress32{0x2f01}, 16);
+    GuestCpuState32 branch_eq_state{};
+    branch_eq_state.cpsr |= 1U << 30U;
+    const auto branch_eq_result = interpreter.run(branch_eq_state, GuestAddress32{0x2f01}, 16);
+    check(branch_ne_result.status == ExecutionStatus::Completed && branch_ne_state.r[0] == 2U
+            && branch_eq_result.status == ExecutionStatus::Completed && branch_eq_state.r[0] == 1U,
+        "T32 conditional B.W follows APSR conditions and sign-extended displacement");
+
     std::vector<std::byte> thumb_table(8, std::byte{0});
     thumb_table[1] = static_cast<std::byte>(6U);
     put_u16(thumb_table, 4, 6U);
