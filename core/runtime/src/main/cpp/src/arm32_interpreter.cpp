@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -385,6 +386,74 @@ void write_vfp_double(GuestCpuState32& state, unsigned index, std::uint64_t valu
         if (rd == 15) return fault("MUL/MLA targeting PC is unsupported");
         state.r[rd] = result;
         if ((instruction & (1U << 20U)) != 0) set_nz(state.cpsr, result);
+        return {};
+    }
+
+    if ((instruction & 0x0e000000U) == 0x08000000U) {
+        const bool pre_index = (instruction & (1U << 24U)) != 0;
+        const bool increment = (instruction & (1U << 23U)) != 0;
+        const bool user_registers = (instruction & (1U << 22U)) != 0;
+        const bool writeback = (instruction & (1U << 21U)) != 0;
+        const bool load = (instruction & (1U << 20U)) != 0;
+        const auto base_register = (instruction >> 16U) & 0xfU;
+        const auto register_list = instruction & 0xffffU;
+        const auto register_count = static_cast<std::uint64_t>(std::popcount(register_list));
+        if (register_count == 0) return fault("empty ARM LDM/STM register list is unsupported");
+        if (user_registers) return fault("ARM LDM/STM user-register or exception-return forms are unsupported");
+        if (base_register == 15U && writeback) return fault("ARM LDM/STM writeback using PC is unpredictable");
+        if (writeback && (register_list & (1U << base_register)) != 0) {
+            return fault("ARM LDM/STM writeback with the base register in the register list is unsupported");
+        }
+        const auto base = arm_register(state, base_register, pc);
+        if ((base & 3U) != 0) return fault("ARM LDM/STM base address is not word-aligned");
+
+        const auto transfer_bytes = register_count * 4U;
+        const auto start = increment
+            ? static_cast<std::uint64_t>(base) + (pre_index ? 4U : 0U)
+            : static_cast<std::uint64_t>(base) - transfer_bytes + (pre_index ? 0U : 4U);
+        const auto writeback_value = increment
+            ? static_cast<std::uint64_t>(base) + transfer_bytes
+            : static_cast<std::uint64_t>(base) - transfer_bytes;
+        const auto address_space_end = static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) + 1U;
+        if (start > std::numeric_limits<std::uint32_t>::max() || start + transfer_bytes > address_space_end
+            || (writeback && writeback_value > std::numeric_limits<std::uint32_t>::max())) {
+            return fault("ARM LDM/STM address range wraps the 32-bit guest address space");
+        }
+        const auto access = load ? GuestPermission::Read : GuestPermission::Write;
+        if (!memory.is_accessible(GuestAddress32{static_cast<std::uint32_t>(start)}, transfer_bytes, access)) {
+            return fault(load ? "ARM LDM accessed unreadable guest memory" : "ARM STM accessed read-only guest memory");
+        }
+
+        std::array<std::uint32_t, 16> loaded_registers{};
+        std::optional<std::uint32_t> loaded_pc;
+        auto address = static_cast<std::uint32_t>(start);
+        for (unsigned reg = 0; reg < 16; ++reg) {
+            if ((register_list & (1U << reg)) == 0) continue;
+            if (load) {
+                const auto value = memory.read_u32(GuestAddress32{address});
+                if (!value.has_value()) return fault("ARM LDM read failed after guest-range validation");
+                if (reg == 15U) loaded_pc = *value;
+                else loaded_registers[reg] = *value;
+            } else {
+                const auto value = reg == 15U ? pc + 12U : state.r[reg];
+                if (!memory.write_u32(GuestAddress32{address}, value)) {
+                    return fault("ARM STM write failed after guest-range validation");
+                }
+            }
+            address += 4U;
+        }
+        if (load) {
+            for (unsigned reg = 0; reg < 15; ++reg) {
+                if ((register_list & (1U << reg)) != 0) state.r[reg] = loaded_registers[reg];
+            }
+            if (writeback) state.r[base_register] = static_cast<std::uint32_t>(writeback_value);
+            if (loaded_pc.has_value()) {
+                state.r[15] = *loaded_pc & ~3U;
+                state.thumb_it_state = 0;
+            }
+        } else if (writeback) {
+            state.r[base_register] = static_cast<std::uint32_t>(writeback_value);
+        }
         return {};
     }
 

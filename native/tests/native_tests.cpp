@@ -2611,6 +2611,29 @@ void test_a32_t32_execution_svc_and_trampolines() {
     check(arm_result.status == ExecutionStatus::Completed && arm_state.r[0] == 8,
         "A32 data-processing instructions execute until SVC exit");
 
+    check(memory.map_zeroed(GuestAddress32{0x8000}, 0x1000,
+            GuestPermission::Read | GuestPermission::Write),
+        "A32 block-transfer stack maps read/write");
+    std::vector<std::byte> arm_multiple_program(32, std::byte{0});
+    put_u32(arm_multiple_program, 0, 0xe3a00011U);  // mov r0, #0x11
+    put_u32(arm_multiple_program, 4, 0xe3a01022U);  // mov r1, #0x22
+    put_u32(arm_multiple_program, 8, 0xe92d0003U);  // stmdb sp!, {r0, r1}
+    put_u32(arm_multiple_program, 12, 0xe3a00000U); // mov r0, #0
+    put_u32(arm_multiple_program, 16, 0xe3a01000U); // mov r1, #0
+    put_u32(arm_multiple_program, 20, 0xe8bd0003U); // ldmia sp!, {r0, r1}
+    put_u32(arm_multiple_program, 24, 0xe3a07001U); // mov r7, #1
+    put_u32(arm_multiple_program, 28, 0xef000000U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x5000}, arm_multiple_program, arm_multiple_program.size(),
+            GuestPermission::Read | GuestPermission::Execute),
+        "A32 LDM/STM test code maps RX");
+    GuestCpuState32 arm_multiple_state{};
+    arm_multiple_state.r[13] = 0x9000U;
+    const auto arm_multiple_result = interpreter.run(arm_multiple_state, GuestAddress32{0x5000}, 32);
+    check(arm_multiple_result.status == ExecutionStatus::Completed
+            && arm_multiple_state.r[0] == 0x11U && arm_multiple_state.r[1] == 0x22U
+            && arm_multiple_state.r[13] == 0x9000U,
+        "A32 STM/LDM transfer registers in order and apply stack-pointer writeback");
+
     std::vector<std::byte> thumb_program(8, std::byte{0});
     put_u16(thumb_program, 0, 0x2007U); // movs r0, #7
     put_u16(thumb_program, 2, 0x3001U); // adds r0, #1
