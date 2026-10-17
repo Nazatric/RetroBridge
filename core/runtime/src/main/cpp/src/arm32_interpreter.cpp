@@ -963,6 +963,39 @@ void write_vfp_double(GuestCpuState32& state, unsigned index, std::uint64_t valu
     const auto combined_instruction = (static_cast<std::uint32_t>(first) << 16U) | second;
     if (const auto vfp_result = execute_vfp_data(state, combined_instruction); vfp_result.has_value()) return *vfp_result;
 
+    const auto table_branch_opcode = second & 0xfff0U;
+    if ((first & 0xfff0U) == 0xe8d0U
+        && (table_branch_opcode == 0xf000U || table_branch_opcode == 0xf010U)) {
+        const bool halfword_table = table_branch_opcode == 0xf010U;
+        const auto rn = first & 0xfU;
+        const auto rm = second & 0xfU;
+        if (rm == 15U) return fault("T32 TBB/TBH index register cannot be PC");
+        const auto base = thumb_register(state, rn, pc);
+        const auto scaled_index = static_cast<std::uint64_t>(state.r[rm]) << (halfword_table ? 1U : 0U);
+        const auto table_address = static_cast<std::uint64_t>(base) + scaled_index;
+        const auto entry_size = halfword_table ? 2U : 1U;
+        const auto guest_address_end = static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) + 1U;
+        if (table_address > std::numeric_limits<std::uint32_t>::max()
+            || table_address + entry_size > guest_address_end) {
+            return fault("T32 TBB/TBH table address wraps the guest address space");
+        }
+        if (halfword_table && (table_address & 1U) != 0) return fault("T32 TBH table address is not halfword-aligned");
+        std::uint32_t branch_offset = 0;
+        if (halfword_table) {
+            const auto entry = memory.read_u16(GuestAddress32{static_cast<std::uint32_t>(table_address)});
+            if (!entry.has_value()) return fault("T32 TBH accessed unreadable guest memory");
+            branch_offset = *entry;
+        } else {
+            const auto entry = memory.read_u8(GuestAddress32{static_cast<std::uint32_t>(table_address)});
+            if (!entry.has_value()) return fault("T32 TBB accessed unreadable guest memory");
+            branch_offset = *entry;
+        }
+        state.r[15] = static_cast<std::uint32_t>(pc + 4U + (branch_offset << 1U)) & ~1U;
+        state.cpsr |= kCpsrThumb;
+        state.thumb_it_state = 0;
+        return {};
+    }
+
     const auto division_prefix = first & 0xfff0U;
     if ((division_prefix == 0xfb90U || division_prefix == 0xfbb0U)
         && (second & 0xf0f0U) == 0xf0f0U) {

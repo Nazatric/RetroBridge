@@ -2758,6 +2758,70 @@ void test_a32_t32_execution_svc_and_trampolines() {
             && thumb_bitfield_state.r[4] == 0xdeada5efU && thumb_bitfield_state.r[5] == 0xfffff00fU,
         "T32 UBFX/SBFX sign-extend fields and BFI/BFC update only the selected bits");
 
+    std::vector<std::byte> thumb_table(8, std::byte{0});
+    thumb_table[1] = static_cast<std::byte>(6U);
+    put_u16(thumb_table, 4, 6U);
+    check(memory.map_bytes(GuestAddress32{0x2a00}, thumb_table, thumb_table.size(), GuestPermission::Read),
+        "TBB/TBH lookup table maps read-only");
+    std::vector<std::byte> tbb_program(22, std::byte{0});
+    put_u16(tbb_program, 0, 0xe8d0U); // tbb [r0, r1]
+    put_u16(tbb_program, 2, 0xf001U);
+    put_u16(tbb_program, 16, 0x2007U); // movs r0, #7 -- table branch target
+    put_u16(tbb_program, 18, 0x2701U); // movs r7, #1
+    put_u16(tbb_program, 20, 0xdf00U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x2900}, tbb_program, tbb_program.size(),
+            GuestPermission::Read | GuestPermission::Execute),
+        "TBB control-flow test code maps RX");
+    GuestCpuState32 tbb_state{};
+    tbb_state.r[0] = 0x2a00U;
+    tbb_state.r[1] = 1U;
+    const auto tbb_result = interpreter.run(tbb_state, GuestAddress32{0x2901}, 16);
+    check(tbb_result.status == ExecutionStatus::Completed && tbb_state.r[0] == 7U,
+        "TBB uses byte-indexed offsets relative to the following Thumb instruction");
+
+    std::vector<std::byte> tbh_program(22, std::byte{0});
+    put_u16(tbh_program, 0, 0xe8d0U); // tbh [r0, r1]
+    put_u16(tbh_program, 2, 0xf011U);
+    put_u16(tbh_program, 16, 0x2009U); // movs r0, #9 -- table branch target
+    put_u16(tbh_program, 18, 0x2701U); // movs r7, #1
+    put_u16(tbh_program, 20, 0xdf00U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x2b00}, tbh_program, tbh_program.size(),
+            GuestPermission::Read | GuestPermission::Execute),
+        "TBH control-flow test code maps RX");
+    GuestCpuState32 tbh_state{};
+    tbh_state.r[0] = 0x2a00U;
+    tbh_state.r[1] = 2U;
+    const auto tbh_result = interpreter.run(tbh_state, GuestAddress32{0x2b01}, 16);
+    check(tbh_result.status == ExecutionStatus::Completed && tbh_state.r[0] == 9U,
+        "TBH scales its register index by two and branches using the halfword table offset");
+
+    std::vector<std::byte> it_program(10, std::byte{0});
+    put_u16(it_program, 0, 0xbf0cU); // ite eq
+    put_u16(it_program, 2, 0x4608U); // mov r0, r1 (then)
+    put_u16(it_program, 4, 0x461aU); // mov r2, r3 (else)
+    put_u16(it_program, 6, 0x2701U); // movs r7, #1
+    put_u16(it_program, 8, 0xdf00U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x2c00}, it_program, it_program.size(),
+            GuestPermission::Read | GuestPermission::Execute),
+        "Thumb IT-block test code maps RX");
+    GuestCpuState32 it_equal_state{};
+    it_equal_state.cpsr |= 1U << 30U;
+    it_equal_state.r[1] = 11U;
+    it_equal_state.r[2] = 99U;
+    it_equal_state.r[3] = 22U;
+    auto it_equal_result = interpreter.run(it_equal_state, GuestAddress32{0x2c01}, 16);
+    GuestCpuState32 it_not_equal_state{};
+    it_not_equal_state.r[0] = 55U;
+    it_not_equal_state.r[1] = 11U;
+    it_not_equal_state.r[2] = 99U;
+    it_not_equal_state.r[3] = 22U;
+    auto it_not_equal_result = interpreter.run(it_not_equal_state, GuestAddress32{0x2c01}, 16);
+    check(it_equal_result.status == ExecutionStatus::Completed && it_equal_state.r[0] == 11U
+            && it_equal_state.r[2] == 99U
+            && it_not_equal_result.status == ExecutionStatus::Completed && it_not_equal_state.r[0] == 55U
+            && it_not_equal_state.r[2] == 22U,
+        "Thumb ITE conditions execute the matching slot and skip the inverse-condition slot");
+
     std::vector<std::byte> vfp_a32_program(20, std::byte{0});
     put_u32(vfp_a32_program, 0, 0xee000a10U);  // vmov s0, r0
     put_u32(vfp_a32_program, 4, 0xee001a90U);  // vmov s1, r1
