@@ -308,10 +308,6 @@ bool GuestBionicThunks::install(std::string* diagnostic) {
                 state.r[0] = kPthreadInvalid;
                 return GuestHookResult{};
             })
-            || !bind("__cxa_finalize", [](GuestCpuState32&, GuestMemory&) {
-                // ELF DT_FINI/DT_FINI_ARRAY entries run separately; C++ atexit registration is not implemented.
-                return GuestHookResult{};
-            })
             || !bind("abort", fault_thunk)
             || !bind("__stack_chk_fail", fault_thunk)
             || !bind("__stack_chk_fail_local", fault_thunk)) {

@@ -95,7 +95,7 @@ jobs:
             -Wl,-soname,libretrobridge_fixture.so -Wl,--build-id=none -Wl,--no-as-needed \
             native/fixtures/arm32_shared_fixture.c \
             -o native/build/arm32-fixtures/libretrobridge_fixture.so
-          "$CC" -marm -O2 -fPIC -shared \
+          "$CC" -marm -O2 -fPIC -shared -nostartfiles \
             -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables \
             -Wl,-soname,libretrobridge_demo.so -Wl,--build-id=none -Wl,--no-as-needed \
             -Wl,--pack-dyn-relocs=none -Wl,--no-undefined \
