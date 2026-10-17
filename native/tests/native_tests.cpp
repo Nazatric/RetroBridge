@@ -11,6 +11,7 @@
 #include "retrobridge/guest_android_window_thunks.h"
 #include "retrobridge/guest_android_input_thunks.h"
 #include "retrobridge/guest_headless_gles_egl_thunks.h"
+#include "retrobridge/guest_opensl_thunks.h"
 #include "retrobridge/handle_table.h"
 #include "retrobridge/runtime_capabilities.h"
 #include "arm32_syscall_dispatcher.h"
@@ -1897,6 +1898,469 @@ void test_headless_egl_gles_clear_subset() {
         "EGL surface destruction releases its native-window reference");
 }
 
+void test_opensl_pcm_buffer_queue_subset() {
+    using namespace retrobridge::runtime;
+    constexpr std::uint32_t kReturnAddress = 0x8000U;
+    constexpr std::uint32_t kData = 0x10000U;
+
+    GuestMemory memory(12U * 1024U * 1024U);
+    std::vector<std::byte> return_code(4, std::byte{0});
+    put_u32(return_code, 0, 0xef000000U);
+    check(memory.map_bytes(GuestAddress32{kReturnAddress}, return_code, return_code.size(),
+        GuestPermission::Read | GuestPermission::Execute), "OpenSL return sentinel maps RX");
+    check(memory.map_zeroed(GuestAddress32{kData}, 0x20000U,
+        GuestPermission::Read | GuestPermission::Write), "OpenSL object and PCM fixture memory maps RW");
+    GuestHeap32 heap(memory);
+    check(heap.initialize(GuestAddress32{0x40000U}, 4U * 1024U * 1024U), "OpenSL guest heap initializes");
+
+    GuestTrampolineRegistry trampolines;
+    GuestOpenSlThunks opensl(memory, heap, trampolines);
+    std::string diagnostic;
+    check(opensl.install(&diagnostic), "bounded OpenSL ES object and queue thunks install");
+    if (!opensl.installed()) return;
+    check(opensl.resolve_symbol("slCreateEngine").has_value()
+            && opensl.resolve_symbol("slQueryNumSupportedEngineInterfaces").has_value()
+            && opensl.resolve_symbol("slQuerySupportedEngineInterfaces").has_value()
+            && opensl.resolve_symbol("SL_IID_ENGINE").has_value()
+            && opensl.resolve_symbol("SL_IID_BUFFERQUEUE").has_value()
+            && opensl.resolve_symbol("SL_IID_ANDROIDSIMPLEBUFFERQUEUE").has_value(),
+        "OpenSL ES entrypoints and selected interface-ID data symbols resolve");
+
+    const auto svc = [](GuestCpuState32& state, std::uint32_t immediate, GuestMemory&) {
+        if (immediate == 0 && state.r[7] == 1) return GuestHookResult{GuestHookAction::Stop, "OpenSL thunk return"};
+        return GuestHookResult{GuestHookAction::Fault, "unexpected OpenSL thunk SVC"};
+    };
+    Arm32Interpreter interpreter(memory, trampolines, svc);
+    const auto invoke = [&](std::uint32_t function, GuestCpuState32 state) {
+        state.r[7] = 1;
+        state.r[14] = kReturnAddress;
+        auto result = interpreter.run(state, GuestAddress32{function}, 16);
+        check(result.status == ExecutionStatus::Completed, "OpenSL ES method returns through guest execution");
+        return std::pair{state, result};
+    };
+    const auto invoke_symbol = [&](std::string_view name, GuestCpuState32 state) {
+        const auto function = opensl.resolve_symbol(name);
+        if (!function.has_value()) {
+            check(false, "OpenSL ES symbol resolves to a guest entrypoint");
+            return std::pair{state, ExecutionResult{}};
+        }
+        return invoke(*function, state);
+    };
+    const auto invoke_interface = [&](std::uint32_t self, std::size_t index, GuestCpuState32 state) {
+        const auto vtable = memory.read_u32(GuestAddress32{self});
+        if (!vtable.has_value()) {
+            check(false, "OpenSL interface handle points at a guest vtable");
+            return std::pair{state, ExecutionResult{}};
+        }
+        const auto slot = static_cast<std::uint64_t>(*vtable) + index * sizeof(std::uint32_t);
+        if (slot > std::numeric_limits<std::uint32_t>::max()) {
+            check(false, "OpenSL vtable method slot stays in the 32-bit guest address space");
+            return std::pair{state, ExecutionResult{}};
+        }
+        const auto function = memory.read_u32(GuestAddress32{static_cast<std::uint32_t>(slot)});
+        if (!function.has_value() || *function == 0) {
+            check(false, "OpenSL vtable method slot contains a guest thunk");
+            return std::pair{state, ExecutionResult{}};
+        }
+        state.r[0] = self;
+        return invoke(*function, state);
+    };
+
+    constexpr std::uint32_t kInterfaceIds = 0x11500U;
+    constexpr std::uint32_t kRequired = 0x11520U;
+    constexpr std::uint32_t kPlayerOutput = 0x11540U;
+    constexpr std::uint32_t kStack = 0x11600U;
+    constexpr std::uint32_t kEngineOptions = 0x11780U;
+    const auto optional_iid_variable = opensl.resolve_symbol("SL_IID_VOLUME");
+    const auto optional_iid = optional_iid_variable.has_value()
+        ? memory.read_u32(GuestAddress32{*optional_iid_variable}).value_or(0U) : 0U;
+    const std::array<std::uint32_t, 4> engine_options{1U, 1U, 2U, 0U};
+    bool engine_setup_ok = optional_iid != 0
+        && memory.write_u32(GuestAddress32{kInterfaceIds}, optional_iid)
+        && memory.write(GuestAddress32{kRequired}, std::array<std::byte, 1>{std::byte{0}})
+        && memory.write_u32(GuestAddress32{kStack}, kInterfaceIds)
+        && memory.write_u32(GuestAddress32{kStack + 4U}, kRequired);
+    for (std::size_t index = 0; index < engine_options.size(); ++index) {
+        engine_setup_ok = memory.write_u32(
+            GuestAddress32{kEngineOptions + static_cast<std::uint32_t>(index * sizeof(std::uint32_t))},
+            engine_options[index]) && engine_setup_ok;
+    }
+    check(engine_setup_ok, "OpenSL engine options and optional interface arrays are staged");
+    if (!engine_setup_ok) return;
+
+    GuestCpuState32 state{};
+    state.r[0] = 0x10028U;
+    auto [interface_count_state, interface_count_result] = invoke_symbol("slQueryNumSupportedEngineInterfaces", state);
+    check(interface_count_result.status == ExecutionStatus::Completed
+            && interface_count_state.r[0] == 0U
+            && memory.read_u32(GuestAddress32{0x10028U}).value_or(0U) == 1U,
+        "slQueryNumSupportedEngineInterfaces enumerates the supported engine interface subset");
+    state = {};
+    state.r[0] = 0U; // first supported interface
+    state.r[1] = 0x1002cU;
+    auto [queried_interface_state, queried_interface_result] = invoke_symbol("slQuerySupportedEngineInterfaces", state);
+    const auto queried_interface_iid = memory.read_u32(GuestAddress32{0x1002cU}).value_or(0U);
+    const auto engine_iid_variable_for_query = opensl.resolve_symbol("SL_IID_ENGINE");
+    const auto engine_iid_for_query = engine_iid_variable_for_query.has_value()
+        ? memory.read_u32(GuestAddress32{*engine_iid_variable_for_query}).value_or(0U) : 0U;
+    check(queried_interface_result.status == ExecutionStatus::Completed
+            && queried_interface_state.r[0] == 0U && queried_interface_iid == engine_iid_for_query,
+        "slQuerySupportedEngineInterfaces returns the guest SL_IID_ENGINE pointer");
+    state = {};
+    state.r[0] = 1U; // out-of-range interface index
+    state.r[1] = 0x1002cU;
+    auto [bad_interface_index_state, bad_interface_index_result] = invoke_symbol("slQuerySupportedEngineInterfaces", state);
+    check(bad_interface_index_result.status == ExecutionStatus::Completed
+            && bad_interface_index_state.r[0] == 2U
+            && memory.read_u32(GuestAddress32{0x1002cU}).value_or(1U) == 0U,
+        "slQuerySupportedEngineInterfaces clears output and rejects an invalid index");
+    state = {};
+    auto [null_count_output_state, null_count_output_result] = invoke_symbol("slQueryNumSupportedEngineInterfaces", state);
+    check(null_count_output_result.status == ExecutionStatus::Completed && null_count_output_state.r[0] == 2U,
+        "slQueryNumSupportedEngineInterfaces rejects a null output pointer");
+
+    state = {};
+    check(memory.write_u32(GuestAddress32{0x1001cU}, 0xabcdef01U),
+        "stage sentinel output before invalid OpenSL input checks");
+    state.r[0] = 0x1001cU;
+    state.r[1] = 1U;
+    state.r[2] = 0xdeadbeefU; // invalid pEngineOptions with a nonzero count
+    auto [bad_options_pointer_state, bad_options_pointer_result] = invoke_symbol("slCreateEngine", state);
+    check(bad_options_pointer_result.status == ExecutionStatus::Completed
+            && bad_options_pointer_state.r[0] == 2U
+            && memory.read_u32(GuestAddress32{0x1001cU}).value_or(1U) == 0U,
+        "slCreateEngine rejects an inaccessible options array without publishing an object");
+
+    check(memory.write_u32(GuestAddress32{kEngineOptions}, 99U)
+            && memory.write_u32(GuestAddress32{kEngineOptions + 4U}, 0U)
+            && memory.write_u32(GuestAddress32{0x1001cU}, 0xabcdef01U),
+        "stage an unsupported OpenSL engine option and a non-null output sentinel");
+    state = {};
+    state.r[0] = 0x1001cU;
+    state.r[1] = 1U;
+    state.r[2] = kEngineOptions;
+    auto [unknown_option_state, unknown_option_result] = invoke_symbol("slCreateEngine", state);
+    check(unknown_option_result.status == ExecutionStatus::Completed
+            && unknown_option_state.r[0] == 2U
+            && memory.read_u32(GuestAddress32{0x1001cU}).value_or(1U) == 0U,
+        "slCreateEngine reports parameter-invalid for unknown engine option features");
+    check(memory.write_u32(GuestAddress32{kEngineOptions}, engine_options[0])
+            && memory.write_u32(GuestAddress32{kEngineOptions + 4U}, engine_options[1]),
+        "restore the recognized thread-safety engine option and its data");
+
+    state = {};
+    state.r[0] = 0x10000U;
+    state.r[1] = 2U; // numOptions
+    state.r[2] = kEngineOptions; // two {feature, data} pairs
+    state.r[3] = 1U; // numInterfaces; both trailing interface pointers are on the guest stack
+    state.r[13] = kStack;
+    auto [engine_create_state, engine_create_result] = invoke_symbol("slCreateEngine", state);
+    const auto engine = memory.read_u32(GuestAddress32{0x10000U}).value_or(0U);
+    check(engine_create_result.status == ExecutionStatus::Completed
+            && engine_create_state.r[0] == 0U && engine != 0,
+        "slCreateEngine accepts Android-compatible options and stack interfaces, then returns a guest object vtable");
+    if (engine == 0) return;
+
+    state = {};
+    state.r[0] = 0x10020U;
+    state.r[2] = 0xdeadbeefU;
+    auto [duplicate_engine_state, duplicate_engine_result] = invoke_symbol("slCreateEngine", state);
+    const auto duplicate_engine = memory.read_u32(GuestAddress32{0x10020U}).value_or(0U);
+    check(duplicate_engine_result.status == ExecutionStatus::Completed
+            && duplicate_engine_state.r[0] == 0U && duplicate_engine == engine,
+        "repeated slCreateEngine shares Android's one engine object and increments its reference count");
+    if (duplicate_engine != 0) {
+        state = {};
+        (void)invoke_interface(duplicate_engine, 6, state); // release only the second engine reference
+    }
+
+    state = {};
+    state.r[1] = 0; // synchronous Realize
+    auto [engine_realize_state, engine_realize_result] = invoke_interface(engine, 0, state);
+    check(engine_realize_result.status == ExecutionStatus::Completed && engine_realize_state.r[0] == 0U,
+        "SLObjectItf.Realize transitions the engine to realized state");
+
+    const auto engine_iid_variable = opensl.resolve_symbol("SL_IID_ENGINE");
+    const auto engine_iid = engine_iid_variable.has_value()
+        ? memory.read_u32(GuestAddress32{*engine_iid_variable}).value_or(0U) : 0U;
+    check(engine_iid != 0
+            && memory.read_u32(GuestAddress32{engine_iid}).value_or(0U) == 0x8d97c260U
+            && memory.read_u16(GuestAddress32{engine_iid + 4U}).value_or(0U) == 0xddd4U
+            && memory.read_u16(GuestAddress32{engine_iid + 6U}).value_or(0U) == 0x11dbU,
+        "SL_IID_ENGINE exports the Android NDK OpenSL ES 1.0.1 UUID");
+    const auto standard_queue_iid_variable = opensl.resolve_symbol("SL_IID_BUFFERQUEUE");
+    const auto standard_queue_iid = standard_queue_iid_variable.has_value()
+        ? memory.read_u32(GuestAddress32{*standard_queue_iid_variable}).value_or(0U) : 0U;
+    check(standard_queue_iid != 0
+            && memory.read_u32(GuestAddress32{standard_queue_iid}).value_or(0U) == 0x2bc99cc0U
+            && memory.read_u16(GuestAddress32{standard_queue_iid + 4U}).value_or(0U) == 0xddd4U,
+        "SL_IID_BUFFERQUEUE exports the Android NDK OpenSL ES 1.0.1 UUID, not the 1.1 identifier");
+    state = {};
+    state.r[1] = engine_iid;
+    state.r[2] = 0x10004U;
+    auto [engine_interface_state, engine_interface_result] = invoke_interface(engine, 3, state);
+    const auto engine_interface = memory.read_u32(GuestAddress32{0x10004U}).value_or(0U);
+    check(engine_interface_result.status == ExecutionStatus::Completed
+            && engine_interface_state.r[0] == 0U && engine_interface != 0,
+        "SLObjectItf.GetInterface returns a distinct guest SLEngineItf");
+    if (engine_interface == 0) return;
+
+    check(memory.write_u32(GuestAddress32{kStack}, kRequired),
+        "stage the single CreateOutputMix stack pointer");
+    state = {};
+    state.r[1] = 0x10008U;
+    state.r[2] = 1U; // one optional interface
+    state.r[3] = kInterfaceIds;
+    state.r[13] = kStack; // pInterfaceRequired is the first stack argument
+    auto [mix_create_state, mix_create_result] = invoke_interface(engine_interface, 7, state);
+    const auto output_mix = memory.read_u32(GuestAddress32{0x10008U}).value_or(0U);
+    check(mix_create_result.status == ExecutionStatus::Completed
+            && mix_create_state.r[0] == 0U && output_mix != 0,
+        "SLEngineItf.CreateOutputMix creates a guest output-mix object");
+    if (output_mix == 0) return;
+    state = {};
+    state.r[1] = 0;
+    auto [mix_realize_state, mix_realize_result] = invoke_interface(output_mix, 0, state);
+    check(mix_realize_result.status == ExecutionStatus::Completed && mix_realize_state.r[0] == 0U,
+        "output-mix object realizes synchronously");
+
+    constexpr std::uint32_t kSource = 0x11000U;
+    constexpr std::uint32_t kSourceLocator = 0x11100U;
+    constexpr std::uint32_t kPcmFormat = 0x11200U;
+    constexpr std::uint32_t kSink = 0x11300U;
+    constexpr std::uint32_t kSinkLocator = 0x11400U;
+    check(memory.write_u32(GuestAddress32{kSource}, kSourceLocator)
+            && memory.write_u32(GuestAddress32{kSource + 4U}, kPcmFormat)
+            && memory.write_u32(GuestAddress32{kSourceLocator}, 0x800007bdU)
+            && memory.write_u32(GuestAddress32{kSourceLocator + 4U}, 2U),
+        "Android simple-buffer-queue PCM source is staged");
+    const std::array<std::uint32_t, 7> pcm_format{1U, 2U, 44'100'000U, 16U, 16U, 3U, 2U};
+    for (std::size_t index = 0; index < pcm_format.size(); ++index) {
+        check(memory.write_u32(GuestAddress32{kPcmFormat + static_cast<std::uint32_t>(index * 4U)}, pcm_format[index]),
+            "write bounded stereo PCM format fields");
+    }
+    const auto output_mix_locator_type = 4U; // SL_DATALOCATOR_OUTPUTMIX
+    check(memory.write_u32(GuestAddress32{kSink}, kSinkLocator)
+            && memory.write_u32(GuestAddress32{kSink + 4U}, 0U)
+            && memory.write_u32(GuestAddress32{kSinkLocator}, output_mix_locator_type)
+            && memory.write_u32(GuestAddress32{kSinkLocator + 4U}, output_mix),
+        "OpenSL audio sink references the realized output mix");
+    const auto queue_iid_variable = opensl.resolve_symbol("SL_IID_ANDROIDSIMPLEBUFFERQUEUE");
+    const auto queue_iid = queue_iid_variable.has_value()
+        ? memory.read_u32(GuestAddress32{*queue_iid_variable}).value_or(0U) : 0U;
+    check(queue_iid != 0
+            && memory.read_u32(GuestAddress32{queue_iid}).value_or(0U) == 0x89f6a7e0U
+            && memory.read_u16(GuestAddress32{queue_iid + 4U}).value_or(0U) == 0xbeacU
+            && memory.read_u16(GuestAddress32{queue_iid + 6U}).value_or(0U) == 0x11dfU,
+        "SL_IID_ANDROIDSIMPLEBUFFERQUEUE exports the Android API-level-9 extension UUID");
+    if (queue_iid == 0) return;
+
+    check(memory.write_u32(GuestAddress32{kStack}, 0U)
+            && memory.write_u32(GuestAddress32{kStack + 4U}, 0U)
+            && memory.write_u32(GuestAddress32{kStack + 8U}, 0U),
+        "stage empty CreateAudioPlayer interface arrays");
+    state = {};
+    state.r[1] = 0x11560U;
+    state.r[2] = kSource;
+    state.r[3] = kSink;
+    state.r[13] = kStack;
+    auto [unrequested_player_state, unrequested_player_result] = invoke_interface(engine_interface, 2, state);
+    const auto unrequested_player = memory.read_u32(GuestAddress32{0x11560U}).value_or(0U);
+    check(unrequested_player_result.status == ExecutionStatus::Completed
+            && unrequested_player_state.r[0] == 0U && unrequested_player != 0,
+        "CreateAudioPlayer accepts no explicit queue interface while retaining the implicit play interface");
+    if (unrequested_player == 0) return;
+    state = {};
+    state.r[1] = 0;
+    auto [unrequested_realize_state, unrequested_realize_result] = invoke_interface(unrequested_player, 0, state);
+    check(unrequested_realize_result.status == ExecutionStatus::Completed && unrequested_realize_state.r[0] == 0U,
+        "player without an explicit buffer-queue interface can realize");
+    state = {};
+    state.r[1] = queue_iid;
+    state.r[2] = 0x11564U;
+    auto [unrequested_queue_state, unrequested_queue_result] = invoke_interface(unrequested_player, 3, state);
+    check(unrequested_queue_result.status == ExecutionStatus::Completed && unrequested_queue_state.r[0] == 12U,
+        "GetInterface does not expose an unrequested explicit buffer queue");
+    state = {};
+    (void)invoke_interface(unrequested_player, 6, state);
+
+    check(memory.write_u32(GuestAddress32{kInterfaceIds}, queue_iid)
+            && memory.write(GuestAddress32{kRequired}, std::array<std::byte, 1>{std::byte{1}}),
+        "required Android simple-buffer-queue IID is staged");
+    check(memory.write_u32(GuestAddress32{kStack}, 1U)
+            && memory.write_u32(GuestAddress32{kStack + 4U}, kInterfaceIds)
+            && memory.write_u32(GuestAddress32{kStack + 8U}, kRequired),
+        "CreateAudioPlayer stack arguments are staged");
+    state = {};
+    state.r[1] = kPlayerOutput;
+    state.r[2] = kSource;
+    state.r[3] = kSink;
+    state.r[13] = kStack;
+    auto [player_create_state, player_create_result] = invoke_interface(engine_interface, 2, state);
+    const auto player = memory.read_u32(GuestAddress32{kPlayerOutput}).value_or(0U);
+    check(player_create_result.status == ExecutionStatus::Completed
+            && player_create_state.r[0] == 0U && player != 0,
+        "CreateAudioPlayer validates PCM layouts and creates a bounded queue player");
+    if (player == 0) return;
+
+    state = {};
+    state.r[1] = 0;
+    auto [player_realize_state, player_realize_result] = invoke_interface(player, 0, state);
+    check(player_realize_result.status == ExecutionStatus::Completed && player_realize_state.r[0] == 0U,
+        "audio player object realizes after its engine and output mix");
+
+    const auto play_iid_variable = opensl.resolve_symbol("SL_IID_PLAY");
+    const auto play_iid = play_iid_variable.has_value()
+        ? memory.read_u32(GuestAddress32{*play_iid_variable}).value_or(0U) : 0U;
+    state = {};
+    state.r[1] = play_iid;
+    state.r[2] = 0x11544U;
+    auto [play_interface_state, play_interface_result] = invoke_interface(player, 3, state);
+    const auto play_interface = memory.read_u32(GuestAddress32{0x11544U}).value_or(0U);
+    check(play_interface_result.status == ExecutionStatus::Completed
+            && play_interface_state.r[0] == 0U && play_interface != 0,
+        "audio player GetInterface returns a guest SLPlayItf");
+    if (play_interface == 0) return;
+    state = {};
+    state.r[1] = queue_iid;
+    state.r[2] = 0x11548U;
+    auto [queue_interface_state, queue_interface_result] = invoke_interface(player, 3, state);
+    const auto queue_interface = memory.read_u32(GuestAddress32{0x11548U}).value_or(0U);
+    check(queue_interface_result.status == ExecutionStatus::Completed
+            && queue_interface_state.r[0] == 0U && queue_interface != 0,
+        "audio player GetInterface returns a guest Android simple buffer queue");
+    if (queue_interface == 0) return;
+
+    state = {};
+    state.r[1] = 3U; // SL_PLAYSTATE_PLAYING
+    auto [play_state_set, play_state_result] = invoke_interface(play_interface, 0, state);
+    check(play_state_result.status == ExecutionStatus::Completed && play_state_set.r[0] == 0U,
+        "SLPlayItf.SetPlayState transitions the synthetic player to playing");
+    state = {};
+    state.r[1] = 0x1154cU;
+    auto [play_state_get, play_state_get_result] = invoke_interface(play_interface, 1, state);
+    check(play_state_get_result.status == ExecutionStatus::Completed && play_state_get.r[0] == 0U
+            && memory.read_u32(GuestAddress32{0x1154cU}).value_or(0U) == 3U,
+        "SLPlayItf.GetPlayState reports the guest playback state");
+
+    const std::array<std::byte, 8> pcm_bytes{
+        std::byte{0x10}, std::byte{0x00}, std::byte{0x20}, std::byte{0x00},
+        std::byte{0x30}, std::byte{0x00}, std::byte{0x40}, std::byte{0x00},
+    };
+    check(memory.write(GuestAddress32{0x12000U}, pcm_bytes), "stage a bounded stereo PCM buffer");
+    state = {};
+    state.r[1] = 0x12000U;
+    state.r[2] = static_cast<std::uint32_t>(pcm_bytes.size());
+    auto [enqueue_state, enqueue_result] = invoke_interface(queue_interface, 0, state);
+    check(enqueue_result.status == ExecutionStatus::Completed && enqueue_state.r[0] == 0U,
+        "Android simple-buffer-queue Enqueue copies guest PCM into bounded host-owned storage");
+    state = {};
+    state.r[1] = 0x11550U;
+    auto [queue_state, queue_state_result] = invoke_interface(queue_interface, 2, state);
+    check(queue_state_result.status == ExecutionStatus::Completed && queue_state.r[0] == 0U
+            && memory.read_u32(GuestAddress32{0x11550U}).value_or(0U) == 1U
+            && memory.read_u32(GuestAddress32{0x11554U}).value_or(1U) == 0U,
+        "buffer queue GetState reports one pending buffer and its current index");
+    const auto consumed = opensl.consume_next_playback_buffer(player);
+    check(consumed.has_value() && consumed->sample_rate_millihz == 44'100'000U
+            && consumed->channels == 2U && consumed->bits_per_sample == 16U
+            && consumed->samples == std::vector<std::byte>(pcm_bytes.begin(), pcm_bytes.end()),
+        "host drain obtains the queued PCM payload without exposing a guest pointer");
+    state = {};
+    state.r[1] = 0x11550U;
+    auto [drained_state, drained_state_result] = invoke_interface(queue_interface, 2, state);
+    check(drained_state_result.status == ExecutionStatus::Completed && drained_state.r[0] == 0U
+            && memory.read_u32(GuestAddress32{0x11550U}).value_or(1U) == 0U
+            && memory.read_u32(GuestAddress32{0x11554U}).value_or(0U) == 1U,
+        "buffer queue state advances after a host-side drain");
+
+    state = {};
+    state.r[1] = 2U; // SL_PLAYSTATE_PAUSED
+    auto [pause_state, pause_result] = invoke_interface(play_interface, 0, state);
+    check(pause_result.status == ExecutionStatus::Completed && pause_state.r[0] == 0U,
+        "SLPlayItf can pause the synthetic queue player");
+    state = {};
+    state.r[1] = 0x12000U;
+    state.r[2] = static_cast<std::uint32_t>(pcm_bytes.size());
+    auto [paused_enqueue_state, paused_enqueue_result] = invoke_interface(queue_interface, 0, state);
+    check(paused_enqueue_result.status == ExecutionStatus::Completed && paused_enqueue_state.r[0] == 0U
+            && !opensl.consume_next_playback_buffer(player).has_value(),
+        "queued PCM is retained but not host-drained while playback is paused");
+    state = {};
+    state.r[1] = 3U;
+    auto [resume_state, resume_result] = invoke_interface(play_interface, 0, state);
+    const auto resumed_buffer = opensl.consume_next_playback_buffer(player);
+    check(resume_result.status == ExecutionStatus::Completed && resume_state.r[0] == 0U
+            && resumed_buffer.has_value(),
+        "resuming playback makes the retained PCM buffer available to the host drain");
+
+    state = {};
+    state.r[1] = 0x12000U;
+    state.r[2] = 3U; // not an integral PCM frame
+    auto [invalid_enqueue_state, invalid_enqueue_result] = invoke_interface(queue_interface, 0, state);
+    check(invalid_enqueue_result.status == ExecutionStatus::Completed
+            && invalid_enqueue_state.r[0] == 2U,
+        "buffer queue rejects partial PCM frames");
+
+    state = {};
+    state.r[1] = 0x9000U; // callbacks are not dispatched by this runtime
+    auto [callback_state, callback_result] = invoke_interface(queue_interface, 3, state);
+    check(callback_result.status == ExecutionStatus::Completed
+            && callback_state.r[0] == 12U,
+        "buffer queue explicitly rejects callback dispatch without a guest scheduler");
+
+    state = {};
+    state.r[1] = 0x12000U;
+    state.r[2] = static_cast<std::uint32_t>(pcm_bytes.size());
+    auto [second_enqueue_state, second_enqueue_result] = invoke_interface(queue_interface, 0, state);
+    state = {};
+    state.r[1] = 0x12000U;
+    state.r[2] = static_cast<std::uint32_t>(pcm_bytes.size());
+    auto [queue_full_state, queue_full_result] = invoke_interface(queue_interface, 0, state);
+    state = {};
+    state.r[1] = 0x12000U;
+    state.r[2] = static_cast<std::uint32_t>(pcm_bytes.size());
+    auto [queue_overflow_state, queue_overflow_result] = invoke_interface(queue_interface, 0, state);
+    state = {};
+    auto [clear_state, clear_result] = invoke_interface(queue_interface, 1, state);
+    state = {};
+    state.r[1] = 0x11550U;
+    auto [clear_get_state, clear_get_result] = invoke_interface(queue_interface, 2, state);
+    check(second_enqueue_result.status == ExecutionStatus::Completed && second_enqueue_state.r[0] == 0U
+            && queue_full_result.status == ExecutionStatus::Completed && queue_full_state.r[0] == 0U
+            && queue_overflow_result.status == ExecutionStatus::Completed && queue_overflow_state.r[0] == 7U
+            && clear_result.status == ExecutionStatus::Completed && clear_state.r[0] == 0U
+            && clear_get_result.status == ExecutionStatus::Completed && clear_get_state.r[0] == 0U
+            && memory.read_u32(GuestAddress32{0x11550U}).value_or(1U) == 0U
+            && memory.read_u32(GuestAddress32{0x11554U}).value_or(1U) == 0U
+            && !opensl.consume_next_playback_buffer(player).has_value(),
+        "buffer queue Clear releases queued PCM, resets the index, and restores bounded queue accounting");
+
+    state = {};
+    auto [destroy_player_state, destroy_player_result] = invoke_interface(player, 6, state);
+    check(destroy_player_result.status == ExecutionStatus::Completed
+            && !opensl.consume_next_playback_buffer(player).has_value(),
+        "SLObjectItf.Destroy invalidates player and queue handles");
+    (void)destroy_player_state;
+    state = {};
+    (void)invoke_interface(output_mix, 6, state);
+    state = {};
+    (void)invoke_interface(engine, 6, state);
+
+    state = {};
+    state.r[0] = 0x10024U;
+    state.r[2] = 0xdeadbeefU; // ignored when numOptions in r1 is zero
+    auto [zero_option_state, zero_option_result] = invoke_symbol("slCreateEngine", state);
+    const auto zero_option_engine = memory.read_u32(GuestAddress32{0x10024U}).value_or(0U);
+    check(zero_option_result.status == ExecutionStatus::Completed
+            && zero_option_state.r[0] == 0U && zero_option_engine != 0,
+        "slCreateEngine ignores the options pointer when numOptions is zero and permits recreation after Destroy");
+    if (zero_option_engine != 0) {
+        state = {};
+        (void)invoke_interface(zero_option_engine, 6, state);
+    }
+}
+
 void test_synthetic_jni_java_vm_tables_and_handles() {
     using namespace retrobridge::runtime;
     GuestMemory memory(1024U * 1024U);
@@ -2261,8 +2725,8 @@ void test_capabilities_and_optional_dbt_placeholder() {
         "the synthetic host-injected AInputQueue/ALooper subset is reported as available");
     check(retrobridge::runtime::current_capabilities().headless_gles_egl_clear_subset,
         "the explicit headless EGL/GLES clear-only subset is reported available");
-    check(!retrobridge::runtime::current_capabilities().opensl_es_audio_thunks,
-        "OpenSL ES audio remains explicitly unavailable");
+    check(retrobridge::runtime::current_capabilities().opensl_es_pcm_buffer_queue_subset,
+        "bounded synthetic OpenSL ES PCM queue primitives are reported as a partial capability");
     check(retrobridge::runtime::current_capabilities().arm32_instruction_execution,
         "bounded ARM instruction interpretation is reported available");
     check(!retrobridge::runtime::current_capabilities().arbitrary_guest_execution,
@@ -2286,6 +2750,7 @@ int main() {
     test_headless_native_window_buffers_and_lifecycle();
     test_synthetic_android_input_queue_and_looper();
     test_headless_egl_gles_clear_subset();
+    test_opensl_pcm_buffer_queue_subset();
     test_synthetic_jni_java_vm_tables_and_handles();
     test_a32_t32_execution_svc_and_trampolines();
     test_capabilities_and_optional_dbt_placeholder();

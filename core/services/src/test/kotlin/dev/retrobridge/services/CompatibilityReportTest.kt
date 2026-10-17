@@ -49,14 +49,17 @@ class CompatibilityReportTest {
     }
 
     @Test
-    fun marksAudioAndFrameworkBridgesUnavailable() {
+    fun reportsOpenSlPartialAndFrameworkUnavailable() {
         val report = CompatibilityReport.capabilities.associateBy(Capability::name)
 
-        listOf(
-            "OpenSL ES audio",
-            "Guest IPC and Android framework virtualization",
-        ).forEach { name ->
-            assertEquals(name, CapabilityStatus.NOT_IMPLEMENTED, report.getValue(name).status)
-        }
+        assertEquals(
+            CapabilityStatus.PARTIAL,
+            report.getValue("OpenSL ES PCM buffer-queue subset").status,
+        )
+        assertTrue(report.getValue("OpenSL ES PCM buffer-queue subset").explanation.contains("no Android audio sink"))
+        assertEquals(
+            CapabilityStatus.NOT_IMPLEMENTED,
+            report.getValue("Guest IPC and Android framework virtualization").status,
+        )
     }
 }

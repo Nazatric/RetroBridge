@@ -62,9 +62,9 @@ object CompatibilityReport {
             explanation = "A synthetic EGL display/config/window-surface/context path renders bounded RGBA_8888 color clears and scissor rectangles into guest memory, with swap and basic error/string queries. It has one non-thread-local current context; there are no shaders, draw calls, textures, buffers, framebuffers, pbuffer surfaces, or Android display integration.",
         ),
         Capability(
-            name = "OpenSL ES audio",
-            status = CapabilityStatus.NOT_IMPLEMENTED,
-            explanation = "No OpenSL ES object/interface or audio-output thunks are implemented.",
+            name = "OpenSL ES PCM buffer-queue subset",
+            status = CapabilityStatus.PARTIAL,
+            explanation = "Synthetic Android OpenSL ES 1.0.1-compatible objects expose guest vtables, Android interface IDs, the engine-interface query entrypoints, a shared reference-counted engine (32 live objects maximum), play state, and bounded PCM queues (32 buffers per player, 1 MiB per buffer, 8 MiB aggregate) with explicit host draining. The Android thread-safety/loss-of-control options are accepted as no-ops. There is no Android audio sink, real-time playback/recording, guest callback dispatch, volume/effects, or APK launch integration.",
         ),
         Capability(
             name = "Guest IPC and Android framework virtualization",

@@ -18,7 +18,7 @@ struct RuntimeCapabilities final {
     bool headless_native_window_buffers = true;
     bool synthetic_android_input_queue_looper_subset = true;
     bool headless_gles_egl_clear_subset = true;
-    bool opensl_es_audio_thunks = false;
+    bool opensl_es_pcm_buffer_queue_subset = true;
     bool android_framework_virtualization = false;
     bool arbitrary_guest_execution = false;
 };
