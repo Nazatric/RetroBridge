@@ -264,13 +264,20 @@ jobs:
             find "$ANDROID_AVD_HOME" -maxdepth 3 -type f -print >&2 || true
             exit 1
           fi
+          AVD_CONFIG="$ANDROID_AVD_HOME/retrobridge-ci.avd/config.ini"
+          if grep -q '^disk\.dataPartition\.size=' "$AVD_CONFIG"; then
+            sed -i 's/^disk\.dataPartition\.size=.*/disk.dataPartition.size=2G/' "$AVD_CONFIG"
+          else
+            echo 'disk.dataPartition.size=2G' >> "$AVD_CONFIG"
+          fi
+          grep -E '^disk\.dataPartition\.size=' "$AVD_CONFIG"
           "$EMULATOR" -avd retrobridge-ci -no-window -no-audio \
             -no-boot-anim -no-snapshot -no-snapshot-save -gpu swiftshader_indirect -accel auto \
             -verbose -show-kernel > diagnostics/emulator.log 2>&1 &
           EMULATOR_PID=$!
           echo "Started Android emulator process $EMULATOR_PID"
-          if ! timeout 180 "$ADB" wait-for-device; then
-            echo "adb did not observe the emulator within 180 seconds." >&2
+          if ! timeout 300 "$ADB" wait-for-device; then
+            echo "adb did not observe the emulator within 300 seconds." >&2
             "$ADB" devices -l >&2 || true
             ps -p "$EMULATOR_PID" -o pid=,stat=,args= >&2 || true
             tail -n 200 diagnostics/emulator.log >&2 || true
@@ -313,6 +320,8 @@ jobs:
               echo '```text' >> "$GITHUB_STEP_SUMMARY"
               if [[ "$log" == *sdkmanager.log ]]; then
                 { tr '\r' '\n' < "$log" | grep -Ei '(^|[^[:alpha:]])(error|warning|failed|unknown archive|invalid|corrupt|exception)([^[:alpha:]]|$)' | tail -n 25 || true; echo '--- final progress ---'; tr '\r' '\n' < "$log" | tail -n 5; } >> "$GITHUB_STEP_SUMMARY"
+              elif [[ "$log" == *emulator.log ]]; then
+                { grep -Ei 'ERROR|FATAL|PANIC|failed|failure|timed out|could not|cannot|not found|boot completed|adb' "$log" | tail -n 30 || true; echo '--- final emulator output ---'; tail -n 30 "$log"; } >> "$GITHUB_STEP_SUMMARY"
               else
                 tail -n 100 "$log" >> "$GITHUB_STEP_SUMMARY"
               fi
@@ -321,6 +330,8 @@ jobs:
                 message="$( { grep -n -E 'FAILURE:|What went wrong|Execution failed|FAILED|error:|e: |Caused by:|Could not resolve|A problem occurred' "$log" | tail -n 100 || true; echo '--- last 50 lines ---'; tail -n 50 "$log"; } | base64 -w0)"
               elif [[ "$log" == *sdkmanager.log ]]; then
                 message="$( { tr '\r' '\n' < "$log" | grep -Ei '(^|[^[:alpha:]])(error|warning|failed|unknown archive|invalid|corrupt|exception)([^[:alpha:]]|$)' | tail -n 25 || true; echo '--- final progress ---'; tr '\r' '\n' < "$log" | tail -n 5; } | base64 -w0)"
+              elif [[ "$log" == *emulator.log ]]; then
+                message="$( { grep -Ei 'ERROR|FATAL|PANIC|failed|failure|timed out|could not|cannot|not found|boot completed|adb' "$log" | tail -n 30 || true; echo '--- final emulator output ---'; tail -n 30 "$log"; } | tail -c 2500 | base64 -w0)"
               else
                 message="$(tail -n 100 "$log" | base64 -w0)"
               fi
