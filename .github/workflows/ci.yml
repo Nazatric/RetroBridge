@@ -187,15 +187,23 @@ jobs:
             find "$ANDROID_HOME/cmdline-tools" -maxdepth 4 -type f -name avdmanager -print >&2 || true
             exit 127
           fi
-          "$SDKMANAGER" --install "platform-tools" "emulator" "system-images;android-35;google_apis;x86_64"
           ADB="$ANDROID_HOME/platform-tools/adb"
           EMULATOR="$ANDROID_HOME/emulator/emulator"
-          if [[ ! -x "$ADB" || ! -x "$EMULATOR" ]]; then
-            echo "Android platform-tools or emulator package did not install the expected executables." >&2
-            ls -la "$ANDROID_HOME/platform-tools" "$ANDROID_HOME/emulator" >&2 || true
+          SYSTEM_IMAGE="$ANDROID_HOME/system-images/android-35/google_apis/x86_64"
+          packages=()
+          [[ -x "$ADB" ]] || packages+=("platform-tools")
+          [[ -x "$EMULATOR" ]] || packages+=("emulator")
+          [[ -d "$SYSTEM_IMAGE" ]] || packages+=("system-images;android-35;google_apis;x86_64")
+          echo "SDK packages requested: ${packages[*]:-none}"
+          if (( ${#packages[@]} > 0 )); then
+            "$SDKMANAGER" --install "${packages[@]}"
+          fi
+          if [[ ! -x "$ADB" || ! -x "$EMULATOR" || ! -d "$SYSTEM_IMAGE" ]]; then
+            echo "Android emulator tooling or API 35 x86_64 system image is unavailable after provisioning." >&2
+            ls -la "$ANDROID_HOME/platform-tools" "$ANDROID_HOME/emulator" "$ANDROID_HOME/system-images/android-35/google_apis" >&2 || true
             exit 127
           fi
-          echo "Using sdkmanager=$SDKMANAGER avdmanager=$AVDMANAGER adb=$ADB emulator=$EMULATOR"
+          echo "Using sdkmanager=$SDKMANAGER avdmanager=$AVDMANAGER adb=$ADB emulator=$EMULATOR system_image=$SYSTEM_IMAGE"
           export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
           echo no | "$AVDMANAGER" create avd --force --name retrobridge-ci \
             --package "system-images;android-35;google_apis;x86_64" --device pixel_2
