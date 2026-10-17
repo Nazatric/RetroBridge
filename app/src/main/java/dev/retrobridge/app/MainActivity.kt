@@ -35,6 +35,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -48,14 +49,18 @@ import dev.retrobridge.manager.GuestAppRecord
 import dev.retrobridge.services.Capability
 import dev.retrobridge.services.CapabilityStatus
 import dev.retrobridge.services.CompatibilityReport
+import dev.retrobridge.runtime.GuestRuntimeProtocol
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.nio.file.Files
 
 class MainActivity : ComponentActivity() {
+    private lateinit var runtimeClient: GuestRuntimeClient
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        runtimeClient = GuestRuntimeClient(this)
 
         val privateRoot = filesDir.toPath().resolve("RetroBridge")
         val repositoryResult = runCatching {
@@ -80,6 +85,8 @@ class MainActivity : ComponentActivity() {
                 }
                 val snackbarHostState = remember { SnackbarHostState() }
                 val scope = rememberCoroutineScope()
+                val runtimeSessions = remember { mutableStateMapOf<String, RuntimeSessionUi>() }
+                var runtimeBusy by remember { mutableStateOf(false) }
                 var selectedId by remember { mutableStateOf<String?>(null) }
                 var storage by remember { mutableStateOf<StorageBreakdown?>(null) }
                 var storageRefresh by remember { mutableIntStateOf(0) }
@@ -118,6 +125,58 @@ class MainActivity : ComponentActivity() {
                 fun replaceRecord(record: GuestAppRecord) {
                     val index = apps.indexOfFirst { it.id == record.id }
                     if (index >= 0) apps[index] = record
+                }
+
+                fun startRuntimeSession(target: GuestAppRecord) {
+                    if (runtimeBusy || runtimeSessions.containsKey(target.id)) return
+                    runtimeBusy = true
+                    scope.launch {
+                        try {
+                            val result = runtimeClient.startInspectionSession(target)
+                            if (result.state != GuestRuntimeProtocol.STATE_INSPECTION_ONLY || result.sessionId == null) {
+                                snackbarHostState.showSnackbar("Runtime context rejected: ${result.diagnostic}")
+                            } else {
+                                runtimeSessions[target.id] = RuntimeSessionUi(
+                                    sessionId = result.sessionId,
+                                    diagnostic = result.diagnostic,
+                                )
+                                snackbarHostState.showSnackbar(
+                                    "Inspection-only runtime context active. Guest APK code was not loaded or executed.",
+                                )
+                            }
+                        } catch (failure: Exception) {
+                            snackbarHostState.showSnackbar("Runtime IPC failed: ${failure.message ?: "unknown error"}")
+                        } finally {
+                            runtimeBusy = false
+                        }
+                    }
+                }
+
+                fun stopRuntimeSession(target: GuestAppRecord) {
+                    val current = runtimeSessions[target.id] ?: return
+                    if (runtimeBusy) return
+                    runtimeBusy = true
+                    scope.launch {
+                        try {
+                            val result = runtimeClient.stopSession(current.sessionId)
+                            if (result.state == GuestRuntimeProtocol.STATE_STOPPED ||
+                                result.state == GuestRuntimeProtocol.STATE_NOT_RUNNING
+                            ) {
+                                runtimeSessions.remove(target.id)
+                            }
+                            snackbarHostState.showSnackbar(result.diagnostic)
+                        } catch (failure: Exception) {
+                            snackbarHostState.showSnackbar("Runtime stop failed: ${failure.message ?: "unknown error"}")
+                        } finally {
+                            runtimeBusy = false
+                        }
+                    }
+                }
+
+                suspend fun stopRuntimeSessionBeforeStorageChange(target: GuestAppRecord) {
+                    val current = runtimeSessions[target.id] ?: return
+                    runCatching { runtimeClient.stopSession(current.sessionId) }
+                    runtimeSessions.remove(target.id)
                 }
 
                 val dataArchivePicker = rememberLauncherForActivityResult(
@@ -222,6 +281,10 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.padding(padding),
                             record = selected,
                             storage = storage,
+                            runtimeSession = runtimeSessions[selected.id],
+                            runtimeBusy = runtimeBusy,
+                            onStartRuntimeSession = { startRuntimeSession(selected) },
+                            onStopRuntimeSession = { stopRuntimeSession(selected) },
                             onBack = { selectedId = null },
                             onAttachData = {
                                 dataArchivePicker.launch(arrayOf("application/zip", "application/x-zip-compressed", "*/*"))
@@ -235,6 +298,7 @@ class MainActivity : ComponentActivity() {
                             onClearData = {
                                 scope.launch {
                                     try {
+                                        stopRuntimeSessionBeforeStorageChange(selected)
                                         withContext(Dispatchers.IO) {
                                             importer?.clearData(selected) ?: error("Registry is unavailable")
                                         }
@@ -248,6 +312,7 @@ class MainActivity : ComponentActivity() {
                             onRemove = {
                                 scope.launch {
                                     try {
+                                        stopRuntimeSessionBeforeStorageChange(selected)
                                         withContext(Dispatchers.IO) {
                                             importer?.remove(selected) ?: error("Registry is unavailable")
                                         }
@@ -265,6 +330,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onDestroy() {
+        runtimeClient.close()
+        super.onDestroy()
     }
 
     private fun queryDisplayName(uri: Uri): String {
@@ -333,6 +403,10 @@ private fun AppDetailsScreen(
     modifier: Modifier,
     record: GuestAppRecord,
     storage: StorageBreakdown?,
+    runtimeSession: RuntimeSessionUi?,
+    runtimeBusy: Boolean,
+    onStartRuntimeSession: () -> Unit,
+    onStopRuntimeSession: () -> Unit,
     onBack: () -> Unit,
     onAttachData: () -> Unit,
     onAttachObb: () -> Unit,
@@ -382,6 +456,12 @@ private fun AppDetailsScreen(
                 .ifBlank { "None detected" },
         )
         InfoRow("Lifecycle", record.state.name.lowercase())
+        InfoRow(
+            "Runtime service context",
+            if (runtimeSession == null) "Not active" else "Inspection-only context active · guest code is not running",
+        )
+        runtimeSession?.let { InfoRow("Runtime session", it.sessionId) }
+        runtimeSession?.let { InfoRow("Runtime diagnostic", it.diagnostic) }
         InfoRow("APK SHA-256", record.sha256)
         InfoRow("Private APK path", record.originalApkPath)
         InfoRow("Split APKs", record.splitApkPaths.joinToString().ifBlank { "None" })
@@ -430,13 +510,23 @@ private fun AppDetailsScreen(
         }
 
         HorizontalDivider()
-        Text("Lifecycle actions", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+        Text("Runtime session controls", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = {}, enabled = false) { Text("Launch") }
-            OutlinedButton(onClick = {}, enabled = false) { Text("Stop") }
-            OutlinedButton(onClick = onExport) { Text("Export data ZIP") }
+            Button(
+                onClick = onStartRuntimeSession,
+                enabled = !runtimeBusy && runtimeSession == null,
+            ) { Text("Start inspection") }
+            OutlinedButton(
+                onClick = onStopRuntimeSession,
+                enabled = !runtimeBusy && runtimeSession != null,
+            ) { Text("Stop session") }
         }
-        Text("Launch and Stop remain disabled because arbitrary Android framework execution is not yet supported.", style = MaterialTheme.typography.bodySmall)
+        OutlinedButton(onClick = onExport, modifier = Modifier.fillMaxWidth()) { Text("Export data ZIP") }
+        Text(
+            "This exercises the isolated service IPC and validated app-private GuestRuntimeContext only. " +
+                "It does not load the APK, start an Activity, or execute guest code.",
+            style = MaterialTheme.typography.bodySmall,
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { pendingAction = PendingAction.CLEAR_DATA }) { Text("Clear Data") }
             OutlinedButton(onClick = { pendingAction = PendingAction.REMOVE }) { Text("Remove") }
@@ -489,5 +579,10 @@ private fun formatBytes(bytes: Long): String {
     } while (amount >= 1024.0 && unit < units.lastIndex)
     return "%.1f %s".format(amount, units[unit])
 }
+
+private data class RuntimeSessionUi(
+    val sessionId: String,
+    val diagnostic: String,
+)
 
 private enum class PendingAction { CLEAR_DATA, REMOVE }

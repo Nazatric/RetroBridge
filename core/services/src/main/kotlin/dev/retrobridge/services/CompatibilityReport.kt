@@ -68,8 +68,8 @@ object CompatibilityReport {
         ),
         Capability(
             name = "Guest IPC and Android framework virtualization",
-            status = CapabilityStatus.NOT_IMPLEMENTED,
-            explanation = "No end-to-end runtime IPC, Activity/Service proxy, PackageManager/Resources bridge, permission model, or guest lifecycle integration is implemented.",
+            status = CapabilityStatus.PARTIAL,
+            explanation = "A private Messenger endpoint starts/stops bounded inspection-only sessions, verifies the stored APK identity, and creates a strict app-private path context. It never loads guest code. Activity/Service proxying, PackageManager/Resources, permissions, Java execution, and guest lifecycle callbacks remain unimplemented.",
         ),
         Capability(
             name = "Rootless app-private storage mapping",
@@ -79,7 +79,7 @@ object CompatibilityReport {
         Capability(
             name = "Execution of arbitrary guest APKs",
             status = CapabilityStatus.NOT_IMPLEMENTED,
-            explanation = "Launch and stop are not functional. Imported APK code is not started because the loader, translator, bridges, framework, IPC, and security boundary are incomplete.",
+            explanation = "The UI can start/stop an inspection-only service context, but this is not a guest-app launch. Imported APK bytecode and native code are never loaded or executed; the loader, translator, bridges, framework, and reviewed execution boundary are not integrated.",
         ),
         Capability(
             name = "Host system ABI spoofing / privileged hooks",

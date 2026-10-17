@@ -12,7 +12,7 @@ RetroBridge is an experimental, rootless-first research project for inspecting a
 - Host APK UI and compatibility report: prototype implementation.
 - NDK `AAssetManager`/`AAsset` thunks read caller-registered immutable blobs; bounded headless `ANativeWindow` thunks expose a 32-bit RGBA pixel buffer. Synthetic `AInputQueue` key/motion records and a nonblocking `ALooper` wake/timeout subset are host-injected only. A software EGL/GLES subset supports window surfaces, color clear, and scissor rendering; it has no draw/shader pipeline. These bridges do not integrate with APK assets, Java `Surface`, Android's input system, or launch. OpenSL ES has only an Android 1.0.1-compatible synthetic engine/player and bounded PCM buffer-queue model; it produces no audible output and dispatches no guest callbacks.
 - Complete ARMv7 execution, broad VFP/NEON coverage, full Bionic/libc/libm/pthread coverage and scheduling, broad JNI/system thunks, dependency loading, and guest framework services: **not implemented**. The interpreter now covers a small scalar VFP transfer/arithmetic subset; the current thunk tables are explicit subsets, not general Android ABI compatibility.
-- Launch and Stop remain intentionally unavailable. The guest runtime service rejects start requests; native execution is not wired to imported APKs and is not a security boundary.
+- A non-exported Messenger control endpoint in `:guest_runtime` can start/stop bounded inspection-only sessions, validates the private APK identity/hash, and builds a guest-private path context. It never loads or executes the APK. These controls are not guest-app Launch/Stop; arbitrary APK execution and Android framework virtualization remain unavailable.
 - No root, privileged system integration, SDK/NDK download, or full-OS virtual machine is required by the source tree.
 
 See [the compatibility matrix](docs/compatibility-matrix.md), [architecture notes](docs/architecture.md), and [security model](docs/security.md) before treating this as anything more than a prototype.
@@ -23,7 +23,7 @@ See [the compatibility matrix](docs/compatibility-matrix.md), [architecture note
 - `core/manager/` — app metadata, persistent registry, and lifecycle state machine.
 - `core/fs/` — isolated guest directory layout, guarded guest-path mapping, streaming data/OBB archive import, and guest-data ZIP export.
 - `core/services/` — explicit, machine-readable capability reporting.
-- `core/runtime/` — Android native-library module, guest-memory/ELF loader, bounded ARM32 interpreter, and lifecycle hooks.
+- `core/runtime/` — Android native-library module, isolated service IPC, inspection-only guest context/path policy, guest-memory/ELF loader, bounded ARM32 interpreter, and lifecycle hooks.
 - `native/` — host-side CMake verification tools and tests; ARM32 binaries are generated and exercised in CI, not checked in.
 - `.github/workflows/ci.yml` — Android, native host, and cross-compiled fixture verification.
 

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application>
-        <!-- Reserved process boundary: this service does not launch or execute guests yet. -->
+        <!-- Private process control endpoint; only validated inspection contexts are supported. -->
         <service
             android:name="dev.retrobridge.runtime.GuestRuntimeService"
             android:exported="false"

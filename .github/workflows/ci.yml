@@ -125,6 +125,7 @@ jobs:
             :app:lintDebug \
             :core:runtime:lintDebug \
             :app:testDebugUnitTest \
+            :core:runtime:testDebugUnitTest \
             :core:manager:test \
             :core:fs:test \
             :core:services:test 2>&1 | tee diagnostics/gradle.log
