@@ -116,6 +116,13 @@ jobs:
           cmake --build native/build/host --parallel 2 2>&1 | tee diagnostics/native-build.log
           ctest --test-dir native/build/host --output-on-failure 2>&1 | tee diagnostics/ctest.log
 
+      - name: Measure host interpreter baseline (informational)
+        shell: bash
+        run: |
+          set -euo pipefail
+          native/build/host/retrobridge_arm32_benchmark 2000000 \
+            | tee diagnostics/arm32-interpreter-benchmark.json
+
       - name: Build arm64-v8a app and run Gradle unit tests
         shell: bash
         run: |
@@ -135,7 +142,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for log in diagnostics/gradle.log diagnostics/ctest.log diagnostics/native-build.log diagnostics/arm32-fixtures.log diagnostics/arm32-vfp-disassembly.log; do
+          for log in diagnostics/gradle.log diagnostics/ctest.log diagnostics/native-build.log diagnostics/arm32-fixtures.log diagnostics/arm32-vfp-disassembly.log diagnostics/arm32-interpreter-benchmark.json; do
             if [[ -s "$log" ]]; then
               echo "### $log (last 100 lines)" >> "$GITHUB_STEP_SUMMARY"
               echo '```text' >> "$GITHUB_STEP_SUMMARY"
@@ -174,7 +181,9 @@ jobs:
             native/build/host/retrobridge_native_tests
             native/build/host/retrobridge_elf_inspect
             native/build/host/retrobridge_arm32_fixture_runner
+            native/build/host/retrobridge_arm32_benchmark
             native/build/host/Testing/Temporary/LastTest.log
             diagnostics/*.log
+            diagnostics/arm32-interpreter-benchmark.json
             **/build/test-results/**/*.xml
             **/build/reports/tests/**

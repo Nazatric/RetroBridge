@@ -20,6 +20,10 @@ add_executable(retrobridge_arm32_fixture_runner tools/arm32_fixture_runner.cpp)
 target_link_libraries(retrobridge_arm32_fixture_runner PRIVATE retrobridge_runtime)
 target_compile_options(retrobridge_arm32_fixture_runner PRIVATE -Wall -Wextra -Wpedantic)
 
+add_executable(retrobridge_arm32_benchmark tools/arm32_interpreter_benchmark.cpp)
+target_link_libraries(retrobridge_arm32_benchmark PRIVATE retrobridge_runtime)
+target_compile_options(retrobridge_arm32_benchmark PRIVATE -Wall -Wextra -Wpedantic)
+
 add_test(NAME native_core COMMAND retrobridge_native_tests)
 
 if(RETROBRIDGE_ARM32_VFP_EXECUTABLE)

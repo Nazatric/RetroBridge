@@ -15,7 +15,7 @@ RetroBridge is an experimental, rootless-first research project for inspecting a
 - A non-exported Messenger control endpoint in `:guest_runtime` can start/stop bounded inspection-only sessions, validates the private APK identity/hash, and builds a guest-private path context. It never loads or executes the APK. These controls are not guest-app Launch/Stop; arbitrary APK execution and Android framework virtualization remain unavailable.
 - No root, privileged system integration, SDK/NDK download, or full-OS virtual machine is required by the source tree.
 
-See [the compatibility matrix](docs/compatibility-matrix.md), [architecture notes](docs/architecture.md), and [security model](docs/security.md) before treating this as anything more than a prototype.
+See the [compatibility matrix](docs/compatibility-matrix.md), [verification matrix](docs/verification-matrix.md), [benchmark notes](docs/benchmark.md), [architecture notes](docs/architecture.md), and [security model](docs/security.md) before treating this as anything more than a prototype.
 
 ## Repository layout
 
@@ -29,6 +29,6 @@ See [the compatibility matrix](docs/compatibility-matrix.md), [architecture note
 
 ## Build and verify
 
-The supported verification path is GitHub Actions (`CI`). It uses the runner's Android SDK/NDK, builds the `arm64-v8a` management APK and native library, cross-compiles small `armeabi-v7a` ELF fixtures, and runs Gradle tests plus host-side CTest. CTest validates metadata, guest heap/VFS/syscall behavior, and loads/relocates/executes NDK-built ARM32 integer and scalar-VFP fixtures with the bounded interpreter. APKs, fixture binaries, test tools, and diagnostics are uploaded as workflow artifacts.
+The supported verification path is GitHub Actions (`CI`). It uses the runner's Android SDK/NDK, builds the `arm64-v8a` management APK and native library, cross-compiles small `armeabi-v7a` ELF fixtures, and runs Gradle tests plus host-side CTest. CTest validates metadata, guest heap/VFS/syscall behavior, and loads/relocates/executes NDK-built ARM32 integer and scalar-VFP fixtures with the bounded interpreter. A non-gating A32 arithmetic/branch microbenchmark reports a host-only baseline. APKs, fixture binaries, test tools, benchmark JSON, and diagnostics are uploaded as workflow artifacts; the [verification matrix](docs/verification-matrix.md) lists exact coverage and gaps.
 
 No Android SDK, NDK, emulator, or heavyweight toolchain is downloaded into the project workspace. A local Gradle/CMake build is optional for contributors, but is not a claim of on-device guest compatibility.
