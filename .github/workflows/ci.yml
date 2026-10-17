@@ -271,6 +271,17 @@ jobs:
             echo 'disk.dataPartition.size=2G' >> "$AVD_CONFIG"
           fi
           grep -E '^disk\.dataPartition\.size=' "$AVD_CONFIG"
+          if [[ ! -e /dev/kvm ]]; then
+            echo "The runner does not expose /dev/kvm; the x86_64 emulator cannot use hardware acceleration." >&2
+            exit 1
+          fi
+          sudo chmod a+rw /dev/kvm
+          ls -l /dev/kvm
+          if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+            echo "The current runner user still cannot access /dev/kvm after permission adjustment." >&2
+            id >&2
+            exit 1
+          fi
           "$EMULATOR" -avd retrobridge-ci -no-window -no-audio \
             -no-boot-anim -no-snapshot -no-snapshot-save -gpu swiftshader_indirect -accel auto \
             -verbose -show-kernel > diagnostics/emulator.log 2>&1 &
