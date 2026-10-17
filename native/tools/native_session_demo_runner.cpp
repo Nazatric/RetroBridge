@@ -8,6 +8,7 @@
 #include <iostream>
 #include <iterator>
 #include <string>
+#include <system_error>
 #include <vector>
 #include <unistd.h>
 
@@ -78,13 +79,31 @@ int main(int argc, char** argv) {
                     }
                     const auto entrypoint = std::find_if(report.entrypoint_results.begin(), report.entrypoint_results.end(),
                         [](const std::string& value) { return value.find("!retrobridge_main => ") != std::string::npos; });
+                    std::string entrypoint_summary;
+                    for (const auto& value : report.entrypoint_results) {
+                        if (!entrypoint_summary.empty()) entrypoint_summary += "; ";
+                        entrypoint_summary += value;
+                    }
+                    if (entrypoint_summary.empty()) entrypoint_summary = "<empty>";
                     if (entrypoint == report.entrypoint_results.end()) {
-                        result_code = fail("session reported no retrobridge_main result; entrypoints=["
-                            + (report.entrypoint_results.empty() ? std::string("<empty>") : report.entrypoint_results.front()) + "]");
+                        result_code = fail("session reported no retrobridge_main result; entrypoints=[" + entrypoint_summary + "]");
                     } else if (entrypoint->find("!retrobridge_main => 42") == std::string::npos) {
                         result_code = fail("retrobridge_main returned an unexpected result: " + *entrypoint);
                     }
                     const auto output_path = root / "internal/files/native-demo.txt";
+                    const auto describe_output_file = [&]() {
+                        std::error_code error;
+                        const bool exists = std::filesystem::exists(output_path, error);
+                        std::string description = "root=" + root.string() + "; guest_file=" + output_path.string()
+                            + "; exists=" + (exists ? "true" : "false");
+                        if (error) description += "; filesystem_error=" + error.message();
+                        if (exists && !error) {
+                            const auto size = std::filesystem::file_size(output_path, error);
+                            if (!error) description += "; size=" + std::to_string(size);
+                            else description += "; size_error=" + error.message();
+                        }
+                        return description;
+                    };
                     std::ifstream output(output_path);
                     const std::string before_stop((std::istreambuf_iterator<char>(output)), std::istreambuf_iterator<char>());
                     const auto constructor = before_stop.find("constructor\n");
@@ -93,8 +112,9 @@ int main(int argc, char** argv) {
                     if (constructor == std::string::npos || on_load == std::string::npos || entry == std::string::npos
                         || before_stop.find("math-failed") != std::string::npos
                         || !(constructor < on_load && on_load < entry)) {
-                        result_code = fail("constructor, JNI_OnLoad, entrypoint, or VFS file-write order is incorrect; guest VFS output=["
-                            + (before_stop.empty() ? std::string("<empty>") : before_stop) + "]");
+                        result_code = fail("constructor, JNI_OnLoad, entrypoint, or VFS file-write order is incorrect; entrypoints=["
+                            + entrypoint_summary + "]; guest VFS output=["
+                            + (before_stop.empty() ? std::string("<empty>") : before_stop) + "]; " + describe_output_file());
                     }
                     session.stop();
                     std::ifstream final_output(output_path);
@@ -102,7 +122,7 @@ int main(int argc, char** argv) {
                     const auto destructor = after_stop.find("destructor\n");
                     if (destructor == std::string::npos || entry == std::string::npos || entry >= destructor) {
                         result_code = fail("guest destructor did not write after the selected entrypoint; guest VFS output=["
-                            + (after_stop.empty() ? std::string("<empty>") : after_stop) + "]");
+                            + (after_stop.empty() ? std::string("<empty>") : after_stop) + "]; " + describe_output_file());
                     }
                     if (result_code == 0) {
                         std::cout << "{\"success\":true,\"guest_instructions\":" << report.guest_instructions

@@ -24,10 +24,12 @@ static int square_root_matches(uint32_t input_bits, uint32_t expected_bits) {
 
 static int append_line(const char* line, size_t length) {
     const int descriptor = open(kDemoPath, O_WRONLY | O_CREAT | O_APPEND, 0600);
-    if (descriptor < 0) return -1;
+    if (descriptor < 0) return -10;
     const ssize_t written = write(descriptor, line, length);
+    const int write_status = written == (ssize_t)length ? 0 : -20;
     const int close_status = close(descriptor);
-    return written == (ssize_t)length && close_status == 0 ? 0 : -1;
+    if (write_status != 0) return write_status;
+    return close_status == 0 ? 0 : -30;
 }
 
 __attribute__((constructor)) static void retrobridge_demo_constructor(void) {
@@ -52,6 +54,6 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* virtual_machine, void* reserved) {
 
 JNIEXPORT int retrobridge_main(void) {
     if (!square_root_matches(0x43100000U, 0x41400000U)) return -1;
-    if (append_line("entrypoint\n", sizeof("entrypoint\n") - 1U) != 0) return -2;
-    return 42;
+    const int write_status = append_line("entrypoint\n", sizeof("entrypoint\n") - 1U);
+    return write_status == 0 ? 42 : write_status;
 }
