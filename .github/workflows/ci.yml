@@ -196,20 +196,45 @@ jobs:
           SYSTEM_IMAGE="$ANDROID_HOME/system-images/android-35/google_apis/x86_64"
           packages=()
           [[ -x "$ADB" ]] || packages+=("platform-tools")
-          [[ -x "$EMULATOR" ]] || packages+=("emulator")
           [[ -d "$SYSTEM_IMAGE" ]] || packages+=("system-images;android-35;google_apis;x86_64")
+          [[ -x "$EMULATOR" ]] || packages+=("emulator")
           echo "SDK packages requested: ${packages[*]:-none}"
           SDKMANAGER_LOG=diagnostics/emulator-sdkmanager.log
-          if (( ${#packages[@]} > 0 )); then
-            if "$SDKMANAGER" --install "${packages[@]}" >"$SDKMANAGER_LOG" 2>&1; then
-              tr '\r' '\n' < "$SDKMANAGER_LOG" | tail -n 20
-            else
-              sdkmanager_status=$?
-              echo "sdkmanager failed with exit code $sdkmanager_status"
-              tr '\r' '\n' < "$SDKMANAGER_LOG" | tail -n 40
-              exit "$sdkmanager_status"
-            fi
-          fi
+          install_sdk_package() {
+            local package="$1" target="$2" attempt status=1 details
+            for attempt in 1 2 3; do
+              echo "Installing SDK package '$package' (attempt $attempt of 3)."
+              if "$SDKMANAGER" --install "$package" >"$SDKMANAGER_LOG" 2>&1; then
+                echo "sdkmanager installed '$package' on attempt $attempt."
+                tr '\r' '\n' < "$SDKMANAGER_LOG" | tail -n 20
+                return 0
+              else
+                status=$?
+                echo "sdkmanager failed installing '$package' with exit code $status."
+                details="$(tr '\r' '\n' < "$SDKMANAGER_LOG" | grep -Ei '(^|[^[:alpha:]])(error|warning|failed|unknown archive|invalid|corrupt|exception)([^[:alpha:]]|$)' | tail -n 20 || true)"
+                if [[ -n "$details" ]]; then
+                  printf '%s\n' "$details"
+                else
+                  tr '\r' '\n' < "$SDKMANAGER_LOG" | tail -n 10
+                fi
+                if (( attempt < 3 )); then
+                  echo "Removing incomplete package directory '$target' before retry."
+                  rm -rf -- "$target"
+                  sleep "$((attempt * 5))"
+                fi
+              fi
+            done
+            return "$status"
+          }
+          for package in "${packages[@]}"; do
+            case "$package" in
+              platform-tools) package_dir="$ANDROID_HOME/platform-tools" ;;
+              emulator) package_dir="$ANDROID_HOME/emulator" ;;
+              'system-images;android-35;google_apis;x86_64') package_dir="$SYSTEM_IMAGE" ;;
+              *) echo "Unexpected Android SDK package '$package'." >&2; exit 2 ;;
+            esac
+            install_sdk_package "$package" "$package_dir"
+          done
           if [[ ! -x "$ADB" || ! -x "$EMULATOR" || ! -d "$SYSTEM_IMAGE" ]]; then
             echo "Android emulator tooling or API 35 x86_64 system image is unavailable after provisioning." >&2
             ls -la "$ANDROID_HOME/platform-tools" "$ANDROID_HOME/emulator" "$ANDROID_HOME/system-images/android-35/google_apis" >&2 || true
@@ -287,7 +312,7 @@ jobs:
               echo "### $log (diagnostic tail)" >> "$GITHUB_STEP_SUMMARY"
               echo '```text' >> "$GITHUB_STEP_SUMMARY"
               if [[ "$log" == *sdkmanager.log ]]; then
-                tr '\r' '\n' < "$log" | tail -n 40 >> "$GITHUB_STEP_SUMMARY"
+                { tr '\r' '\n' < "$log" | grep -Ei '(^|[^[:alpha:]])(error|warning|failed|unknown archive|invalid|corrupt|exception)([^[:alpha:]]|$)' | tail -n 25 || true; echo '--- final progress ---'; tr '\r' '\n' < "$log" | tail -n 5; } >> "$GITHUB_STEP_SUMMARY"
               else
                 tail -n 100 "$log" >> "$GITHUB_STEP_SUMMARY"
               fi
@@ -295,7 +320,7 @@ jobs:
               if [[ "$log" == *gradle.log ]]; then
                 message="$( { grep -n -E 'FAILURE:|What went wrong|Execution failed|FAILED|error:|e: |Caused by:|Could not resolve|A problem occurred' "$log" | tail -n 100 || true; echo '--- last 50 lines ---'; tail -n 50 "$log"; } | base64 -w0)"
               elif [[ "$log" == *sdkmanager.log ]]; then
-                message="$(tr '\r' '\n' < "$log" | tail -n 40 | base64 -w0)"
+                message="$( { tr '\r' '\n' < "$log" | grep -Ei '(^|[^[:alpha:]])(error|warning|failed|unknown archive|invalid|corrupt|exception)([^[:alpha:]]|$)' | tail -n 25 || true; echo '--- final progress ---'; tr '\r' '\n' < "$log" | tail -n 5; } | base64 -w0)"
               else
                 message="$(tail -n 100 "$log" | base64 -w0)"
               fi
