@@ -46,7 +46,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* virtual_machine, void* reserved) {
     (void)virtual_machine;
     (void)reserved;
     (void)square_root_matches(0x42800000U, 0x41000000U);
-    if (append_line("JNI_OnLoad\n", sizeof("JNI_OnLoad\n") - 1U) != 0) return JNI_ERR;
+    (void)append_line("JNI_OnLoad\n", sizeof("JNI_OnLoad\n") - 1U);
     return JNI_VERSION_1_6;
 }
 

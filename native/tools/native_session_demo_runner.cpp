@@ -79,7 +79,9 @@ int main(int argc, char** argv) {
                     const auto entrypoint = std::find_if(report.entrypoint_results.begin(), report.entrypoint_results.end(),
                         [](const std::string& value) { return value.find("retrobridge_main => 42") != std::string::npos; });
                     if (entrypoint == report.entrypoint_results.end()) {
-                        result_code = fail("retrobridge_main did not return 42");
+                        result_code = fail("retrobridge_main did not return 42; the session reported no entrypoint result");
+                    } else if (entrypoint->find("retrobridge_main => 42") == std::string::npos) {
+                        result_code = fail("retrobridge_main returned an unexpected result: " + *entrypoint);
                     }
                     const auto output_path = root / "internal/files/native-demo.txt";
                     std::ifstream output(output_path);
