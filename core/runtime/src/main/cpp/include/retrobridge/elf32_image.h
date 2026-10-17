@@ -68,6 +68,7 @@ public:
     [[nodiscard]] std::uint32_t entry_point() const noexcept { return entry_point_; }
     [[nodiscard]] const std::vector<ElfSegment32>& segments() const noexcept { return segments_; }
     [[nodiscard]] const std::vector<std::string>& needed_libraries() const noexcept { return needed_libraries_; }
+    [[nodiscard]] const std::optional<std::string>& soname() const noexcept { return soname_; }
     [[nodiscard]] std::size_t load_segment_count() const noexcept;
 
 private:
@@ -75,6 +76,7 @@ private:
     std::uint32_t entry_point_ = 0;
     std::vector<ElfSegment32> segments_;
     std::vector<std::string> needed_libraries_;
+    std::optional<std::string> soname_;
 };
 
 }  // namespace retrobridge::runtime

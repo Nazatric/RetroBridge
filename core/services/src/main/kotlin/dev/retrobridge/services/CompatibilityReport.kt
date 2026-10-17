@@ -22,9 +22,9 @@ object CompatibilityReport {
             explanation = "A single APK can be copied and inspected. Bundled .so entries receive bounded ELF class, machine, ET_DYN, and PT_LOAD structural checks; passing does not establish linkability or loadability. Split APK installation is not implemented.",
         ),
         Capability(
-            name = "Host-side ARM32 ELF loading and relocation",
+            name = "ARM32 ELF loading and relocation",
             status = CapabilityStatus.PARTIAL,
-            explanation = "The host-testable loader maps ELF32/EM_ARM PT_LOAD segments and applies a constrained ARM REL subset. RELA/RELR/Android packed relocations, dependency loading, full dynamic linking, and APK launch integration are unsupported.",
+            explanation = "The runtime maps app-private ELF32/EM_ARM ET_DYN libraries in DT_NEEDED order and applies a constrained ARM REL subset against loaded images and explicit thunks. RELA/RELR/Android packed relocations, broad linker namespaces, and many imports remain unsupported; ELF preflight is not proof that an APK will launch.",
         ),
         Capability(
             name = "ARM32 / Thumb instruction execution",
@@ -34,12 +34,12 @@ object CompatibilityReport {
         Capability(
             name = "Guest heap, VFS, and ARM EABI syscalls",
             status = CapabilityStatus.PARTIAL,
-            explanation = "The host-testable guest heap, guarded app-private VFS, selected Linux EABI syscalls, and libc/libm/pthread thunks cover a narrow subset. Unknown calls fail explicitly; there is no guest scheduler, broad Bionic surface, or APK runtime wiring.",
+            explanation = "The bounded runtime session wires a guest heap, guarded app-private VFS, selected Linux EABI syscalls, and partial libc/libm/pthread thunks. Unknown calls fail explicitly; there is no guest scheduler or complete Bionic surface.",
         ),
         Capability(
             name = "JNI and JavaVM",
             status = CapabilityStatus.PARTIAL,
-            explanation = "A synthetic 32-bit JNI/JavaVM table and selected handles, marshaling, exception, and native-registration operations are tested. This is not ART or general Java execution; the full JNI table, GC, callbacks, and APK integration are absent.",
+            explanation = "A synthetic 32-bit JNI/JavaVM table and selected handles, marshaling, exception, and native-registration operations are wired into native-library sessions. This is not ART or general Java execution; most JNI entries, GC, host Java callbacks, and Activity integration are absent.",
         ),
         Capability(
             name = "NDK AAssetManager/AAsset subset",
@@ -69,7 +69,7 @@ object CompatibilityReport {
         Capability(
             name = "Guest IPC and Android framework virtualization",
             status = CapabilityStatus.PARTIAL,
-            explanation = "A private Messenger endpoint starts/stops bounded inspection-only sessions, verifies the stored APK identity, and creates a strict app-private path context. It never loads guest code. Activity/Service proxying, PackageManager/Resources, permissions, Java execution, and guest lifecycle callbacks remain unimplemented.",
+            explanation = "A private Messenger endpoint verifies the APK identity, extracts SHA-256-checked ARM32 libraries, and starts/stops an instruction-budgeted interpreter session with constructor, JNI_OnLoad, and selected exported-entrypoint reporting. It does not launch an Android Activity or virtualize Activity/Service, PackageManager/Resources, permissions, Java execution, or general guest lifecycle callbacks.",
         ),
         Capability(
             name = "Rootless app-private storage mapping",
@@ -79,7 +79,7 @@ object CompatibilityReport {
         Capability(
             name = "Execution of arbitrary guest APKs",
             status = CapabilityStatus.NOT_IMPLEMENTED,
-            explanation = "The UI can start/stop an inspection-only service context, but this is not a guest-app launch. Imported APK bytecode and native code are never loaded or executed; the loader, translator, bridges, framework, and reviewed execution boundary are not integrated.",
+            explanation = "The UI can launch only selected ARM32 native libraries whose dependencies, relocations, imports, constructors, and supported entrypoints fit the implemented interpreter/thunk subset. APK Java bytecode, arbitrary application entrypoints, full Android framework behavior, and unsupported native APIs are not executed; this is not general APK compatibility or a security boundary for untrusted apps.",
         ),
         Capability(
             name = "Host system ABI spoofing / privileged hooks",

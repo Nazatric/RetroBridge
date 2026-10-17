@@ -45,11 +45,11 @@ class CompatibilityReportTest {
             CapabilityStatus.NOT_IMPLEMENTED,
             report.getValue("Execution of arbitrary guest APKs").status,
         )
-        assertTrue(report.getValue("Execution of arbitrary guest APKs").explanation.contains("not a guest-app launch"))
+        assertTrue(report.getValue("Execution of arbitrary guest APKs").explanation.contains("selected ARM32 native libraries"))
     }
 
     @Test
-    fun reportsOpenSlAndInspectionOnlyRuntimeAsPartial() {
+    fun reportsOpenSlAndBoundedNativeRuntimeAsPartial() {
         val report = CompatibilityReport.capabilities.associateBy(Capability::name)
 
         assertEquals(
@@ -62,7 +62,7 @@ class CompatibilityReportTest {
             report.getValue("Guest IPC and Android framework virtualization").status,
         )
         assertTrue(
-            report.getValue("Guest IPC and Android framework virtualization").explanation.contains("never loads guest code"),
+            report.getValue("Guest IPC and Android framework virtualization").explanation.contains("selected exported-entrypoint reporting"),
         )
     }
 }

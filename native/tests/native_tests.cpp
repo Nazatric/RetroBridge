@@ -12,6 +12,7 @@
 #include "retrobridge/guest_android_input_thunks.h"
 #include "retrobridge/guest_headless_gles_egl_thunks.h"
 #include "retrobridge/guest_opensl_thunks.h"
+#include "retrobridge/native_execution_session.h"
 #include "retrobridge/handle_table.h"
 #include "retrobridge/runtime_capabilities.h"
 #include "arm32_syscall_dispatcher.h"
@@ -90,8 +91,8 @@ std::vector<std::byte> make_dynamic_arm_elf() {
     put_u32(bytes, 84, 2);
     put_u32(bytes, 88, 0x100);
     put_u32(bytes, 92, 0x100);
-    put_u32(bytes, 100, 32);
-    put_u32(bytes, 104, 32);
+    put_u32(bytes, 100, 40);
+    put_u32(bytes, 104, 40);
     put_u32(bytes, 108, 4);
     put_u32(bytes, 112, 4);
 
@@ -101,8 +102,10 @@ std::vector<std::byte> make_dynamic_arm_elf() {
     put_u32(bytes, 0x10c, 15);
     put_u32(bytes, 0x110, 1);       // DT_NEEDED
     put_u32(bytes, 0x114, 1);
-    put_u32(bytes, 0x118, 0);       // DT_NULL
-    put_u32(bytes, 0x11c, 0);
+    put_u32(bytes, 0x118, 14);      // DT_SONAME
+    put_u32(bytes, 0x11c, 1);
+    put_u32(bytes, 0x120, 0);       // DT_NULL
+    put_u32(bytes, 0x124, 0);
     const std::string needed("\0libfixture.so\0", 15);
     for (std::size_t index = 0; index < needed.size(); ++index) {
         bytes[0x180 + index] = static_cast<std::byte>(static_cast<unsigned char>(needed[index]));
@@ -365,6 +368,45 @@ void test_elf32_loader_maps_symbols_relocations_and_constructors() {
         "GNU hash lookup works without a SysV hash table");
 }
 
+void test_native_execution_session_runs_mapped_library_lifecycle() {
+    using namespace retrobridge::runtime;
+    auto bytes = make_loadable_arm_elf();
+    // Keep only the two R_ARM_RELATIVE relocations used to initialize constructor/finalizer arrays.
+    put_u32(bytes, 0x134, 0x288); // DT_REL
+    put_u32(bytes, 0x13c, 16);    // DT_RELSZ
+
+    const auto root = std::filesystem::temp_directory_path()
+        / ("retrobridge-native-session-" + std::to_string(static_cast<unsigned long long>(::getpid())));
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "internal/files");
+    std::filesystem::create_directories(root / "external/data");
+    std::filesystem::create_directories(root / "obb");
+    std::filesystem::create_directories(root / "runtime/native");
+
+    {
+        NativeExecutionSession session(root, "org.example.nativefixture");
+        std::string diagnostic;
+        check(session.initialize(&diagnostic), "native execution session installs bounded guest services");
+        if (session.initialized()) {
+            const auto loaded = session.load_library(bytes, "libsession_fixture.so");
+            check(loaded.loaded && loaded.load_address == 0x40000000U,
+                "native execution session maps a verified ARM32 ET_DYN image");
+            const auto report = session.execute(128);
+            check(report.success, "native execution session executes mapped constructors under budget");
+            check(report.guest_instructions == 6,
+                "native execution report counts real A32/T32 constructor instructions and return thunks");
+            check(report.relocation_count == 2,
+                "native execution report records applied constructor-array relocations");
+            check(report.loaded_libraries.size() == 1 && report.loaded_libraries.front() == "libsession_fixture.so",
+                "native execution report names loaded guest libraries");
+            session.stop();
+        } else {
+            std::cerr << "Native session initialization diagnostic: " << diagnostic << '\n';
+        }
+    }
+    std::filesystem::remove_all(root);
+}
+
 void test_elf_validation_and_dependencies() {
     auto bytes = make_dynamic_arm_elf();
     auto result = retrobridge::runtime::Elf32Image::parse(bytes, "fixture.so", "org.example.test");
@@ -377,6 +419,7 @@ void test_elf_validation_and_dependencies() {
         if (image->needed_libraries().size() == 1) {
             check(image->needed_libraries().front() == "libfixture.so", "DT_NEEDED name resolves through DT_STRTAB");
         }
+        check(image->soname().value_or("") == "libfixture.so", "DT_SONAME is extracted for dependency ordering");
     }
 
     bytes[18] = std::byte{3};
@@ -2729,6 +2772,9 @@ void test_capabilities_and_optional_dbt_placeholder() {
         "bounded synthetic OpenSL ES PCM queue primitives are reported as a partial capability");
     check(retrobridge::runtime::current_capabilities().arm32_instruction_execution,
         "bounded ARM instruction interpretation is reported available");
+    check(retrobridge::runtime::current_capabilities().arm32_shared_library_session
+            && retrobridge::runtime::current_capabilities().bounded_native_entrypoint_execution,
+        "bounded APK native-library sessions and selected entrypoint execution are reported available");
     check(!retrobridge::runtime::current_capabilities().arbitrary_guest_execution,
         "arbitrary guest execution remains unavailable pending a full compatibility/security layer");
 }
@@ -2739,6 +2785,7 @@ int main() {
     test_guest_address_boundary();
     test_guest_memory_permissions_and_bounds();
     test_elf32_loader_maps_symbols_relocations_and_constructors();
+    test_native_execution_session_runs_mapped_library_lifecycle();
     test_elf_validation_and_dependencies();
     test_opaque_handles_and_generation();
     test_native_vfs_path_translation();

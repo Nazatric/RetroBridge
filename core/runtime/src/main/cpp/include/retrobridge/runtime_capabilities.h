@@ -6,6 +6,8 @@ struct RuntimeCapabilities final {
     bool arm32_elf_metadata_validation = true;
     bool arm32_instruction_translation = false;
     bool arm32_instruction_execution = true;
+    bool arm32_shared_library_session = true;
+    bool bounded_native_entrypoint_execution = true;
     bool guest_elf_mapping_and_supported_relocations = true;
     bool guest_heap_allocator = true;
     bool native_guest_vfs = true;

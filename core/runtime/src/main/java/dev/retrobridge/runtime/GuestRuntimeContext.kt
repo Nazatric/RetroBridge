@@ -8,9 +8,8 @@ import java.security.MessageDigest
 import java.util.UUID
 
 /**
- * Metadata-only guest context used by the isolated runtime process. It deliberately does not wrap
- * android.content.Context or expose host objects to guest code. The current context can resolve
- * app-private path roots, but it cannot load or execute the imported APK.
+ * App-private guest storage and identity passed to the interpreter-backed ARM32 runtime. It does
+ * not wrap android.content.Context or expose host objects; it is not a virtual Android framework.
  */
 class GuestRuntimeContext internal constructor(
     val guestId: String,
@@ -23,14 +22,13 @@ class GuestRuntimeContext internal constructor(
     val externalDataRoot: Path,
     val obbRoot: Path,
 ) {
-    val guestCodeExecutionEnabled: Boolean = false
     val frameworkCapabilities: Set<GuestFrameworkCapability> = setOf(
         GuestFrameworkCapability.PACKAGE_IDENTITY,
         GuestFrameworkCapability.APP_PRIVATE_PATH_MAPPING,
     )
 
-    val executionUnavailableReason: String =
-        "APK code, Java framework classes, and Android lifecycle callbacks are not loaded or executed."
+    val nativeExecutionLimitations: String =
+        "Only supported ARM32 ELF code runs in the bounded interpreter; Java bytecode, Activities, and full Android framework virtualization are not provided."
 
     /** Resolve only the selected app's private /data and Android/data/obb guest paths. */
     fun resolveGuestPath(guestPath: String): Path {
@@ -201,9 +199,11 @@ object GuestRuntimeContextFactory {
 }
 
 enum class GuestRuntimeSessionState {
-    INSPECTION_ONLY,
+    RUNNING,
     STOPPED,
     NOT_RUNNING,
+    FAILED,
+    UNSUPPORTED,
     REJECTED,
 }
 
@@ -215,35 +215,88 @@ data class GuestRuntimeSessionResult(
     val guestCodeStarted: Boolean,
     val startedAtEpochMs: Long,
     val diagnostic: String,
+    val guestInstructions: Long = 0,
+    val relocationCount: Int = 0,
+    val jniOnLoadVersion: Int = -1,
+    val registeredNativeCount: Int = 0,
+    val loadedLibraries: List<String> = emptyList(),
+    val entrypointResults: List<String> = emptyList(),
 )
 
-/** A bounded, in-process supervisor for inspect-only contexts; no guest executable is loaded. */
+/** Owns bounded interpreter sessions in the private runtime process. */
 class GuestRuntimeSessionSupervisor(
     privateRoot: Path,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val nativeController: NativeRuntimeController = JniNativeRuntimeController,
 ) {
-    private data class Session(val context: GuestRuntimeContext, val startedAtEpochMs: Long)
+    private data class Session(
+        val context: GuestRuntimeContext,
+        val nativeSessionId: Long,
+        val startedAtEpochMs: Long,
+        val report: NativeExecutionReport,
+    )
 
     private val privateRoot = privateRoot.toAbsolutePath().normalize()
     private val sessions = linkedMapOf<String, Session>()
 
     @Synchronized
-    fun startInspectionSession(request: GuestRuntimeContextRequest): GuestRuntimeSessionResult {
-        val context = GuestRuntimeContextFactory.create(privateRoot, request)
+    fun startGuestRuntimeSession(request: GuestRuntimeContextRequest): GuestRuntimeSessionResult {
+        val context = try {
+            GuestRuntimeContextFactory.create(privateRoot, request)
+        } catch (failure: Exception) {
+            return failureResult(request, failure)
+        }
         val existing = sessions.entries.firstOrNull { it.value.context.guestId == context.guestId }
         if (existing != null) {
             if (existing.value.context.apkSha256 != context.apkSha256) {
-                throw SecurityException("A different APK identity is already associated with this guest session")
+                return failureResult(request, SecurityException("A different APK identity is already running for this guest"))
             }
-            return result(existing.key, existing.value, GuestRuntimeSessionState.INSPECTION_ONLY,
-                "Inspection-only runtime context is already active; guest code was not loaded or executed.")
+            return result(existing.key, existing.value, GuestRuntimeSessionState.RUNNING,
+                "ARM32 guest runtime is already active. ${summarize(existing.value.report)}")
         }
-        if (sessions.size >= MAX_ACTIVE_SESSIONS) throw IOException("Runtime inspection-session limit reached")
-        val session = Session(context, clock().coerceAtLeast(0))
-        val sessionId = UUID.randomUUID().toString()
-        sessions[sessionId] = session
-        return result(sessionId, session, GuestRuntimeSessionState.INSPECTION_ONLY,
-            "Inspection-only runtime context is active; APK bytecode and native code were not loaded or executed.")
+        if (sessions.size >= MAX_ACTIVE_SESSIONS) {
+            return failureResult(request, java.io.IOException("Runtime session limit reached"))
+        }
+
+        var nativeSessionId = 0L
+        try {
+            val extraction = NativeLibraryExtractor.extract(context)
+            nativeSessionId = nativeController.createSession(context)
+            if (nativeSessionId <= 0L) throw IllegalStateException("Native interpreter returned an invalid session handle")
+
+            val inspected = linkedMapOf<Path, NativeLibraryMetadata>()
+            for (library in extraction.libraries) {
+                val metadata = nativeController.inspectLibrary(nativeSessionId, library.path.toString())
+                if (!metadata.valid) {
+                    throw IllegalArgumentException(metadata.diagnostic.ifBlank { "Invalid ARM32 library ${library.fileName}" })
+                }
+                inspected[library.path] = metadata
+            }
+            val loadOrder = NativeLibraryExtractor.dependencyOrder(extraction.libraries, inspected)
+            for (library in loadOrder) {
+                NativeLibraryExtractor.verifyExtractedFile(library.path, library.sha256, library.size)
+                val loaded = nativeController.loadLibrary(nativeSessionId, library.path.toString(), library.sha256)
+                if (!loaded.loaded) {
+                    throw IllegalStateException(loaded.diagnostic.ifBlank { "Unable to map ${library.fileName}" })
+                }
+            }
+
+            val report = nativeController.execute(nativeSessionId, MAX_GUEST_INSTRUCTIONS)
+            if (!report.success || report.guestInstructions <= 0L) {
+                val diagnostic = report.diagnostics.joinToString("; ").ifBlank {
+                    "No supported ARM32 guest code completed under the instruction budget"
+                }
+                throw NativeExecutionFailure(diagnostic, report)
+            }
+            val session = Session(context, nativeSessionId, clock().coerceAtLeast(0L), report)
+            val sessionId = UUID.randomUUID().toString()
+            sessions[sessionId] = session
+            return result(sessionId, session, GuestRuntimeSessionState.RUNNING,
+                "Interpreter-backed ARM32 native execution completed within budget. ${summarize(report)}")
+        } catch (failure: Exception) {
+            if (nativeSessionId > 0L) runCatching { nativeController.destroySession(nativeSessionId) }
+            return failureResult(request, failure)
+        }
     }
 
     @Synchronized
@@ -256,10 +309,12 @@ class GuestRuntimeSessionSupervisor(
                 state = GuestRuntimeSessionState.NOT_RUNNING,
                 guestCodeStarted = false,
                 startedAtEpochMs = 0,
-                diagnostic = "No active inspection session matches that ID.",
+                diagnostic = "No active ARM32 runtime session matches that ID.",
             )
+        val teardownDiagnostic = runCatching { nativeController.destroySession(session.nativeSessionId) }
+            .exceptionOrNull()?.let { "; native teardown diagnostic: ${it.message ?: it.javaClass.simpleName}" }.orEmpty()
         return result(sessionId, session, GuestRuntimeSessionState.STOPPED,
-            "Inspection-only context was stopped; no guest code had been executed.")
+            "ARM32 interpreter session stopped; bounded guest destructors were requested.$teardownDiagnostic")
     }
 
     @Synchronized
@@ -267,8 +322,41 @@ class GuestRuntimeSessionSupervisor(
 
     @Synchronized
     fun stopAll() {
+        sessions.values.forEach { session ->
+            runCatching { nativeController.destroySession(session.nativeSessionId) }
+        }
         sessions.clear()
     }
+
+    private fun failureResult(request: GuestRuntimeContextRequest, failure: Exception): GuestRuntimeSessionResult {
+        val unsupported = failure is java.io.IOException &&
+            (failure.message.orEmpty().contains("no armeabi", ignoreCase = true)
+                || failure.message.orEmpty().contains("no ARM32", ignoreCase = true))
+        return GuestRuntimeSessionResult(
+            sessionId = null,
+            guestId = request.guestId.take(64),
+            packageName = request.packageName.take(256),
+            state = if (unsupported) GuestRuntimeSessionState.UNSUPPORTED else GuestRuntimeSessionState.FAILED,
+            guestCodeStarted = (failure as? NativeExecutionFailure)?.report?.guestInstructions?.let { it > 0L } ?: false,
+            startedAtEpochMs = 0,
+            diagnostic = (failure.message ?: failure.javaClass.simpleName).take(MAX_DIAGNOSTIC_LENGTH),
+            guestInstructions = (failure as? NativeExecutionFailure)?.report?.guestInstructions ?: 0L,
+            relocationCount = (failure as? NativeExecutionFailure)?.report?.relocationCount ?: 0,
+            jniOnLoadVersion = (failure as? NativeExecutionFailure)?.report?.jniOnLoadVersion ?: -1,
+            registeredNativeCount = (failure as? NativeExecutionFailure)?.report?.registeredNativeCount ?: 0,
+            loadedLibraries = (failure as? NativeExecutionFailure)?.report?.loadedLibraries?.toList().orEmpty(),
+            entrypointResults = (failure as? NativeExecutionFailure)?.report?.entrypointResults?.toList().orEmpty(),
+        )
+    }
+
+    private fun summarize(report: NativeExecutionReport): String = buildString {
+        append("instructions=").append(report.guestInstructions)
+        append(", relocations=").append(report.relocationCount)
+        append(", libraries=").append(report.loadedLibraries.joinToString().ifBlank { "none" })
+        if (report.jniOnLoadVersion >= 0) append(", JNI_OnLoad=0x").append(report.jniOnLoadVersion.toUInt().toString(16))
+        if (report.registeredNativeCount > 0) append(", registered JNI natives=").append(report.registeredNativeCount)
+        if (report.entrypointResults.isNotEmpty()) append(", entrypoints=").append(report.entrypointResults.joinToString())
+    }.take(MAX_DIAGNOSTIC_LENGTH)
 
     private fun result(
         sessionId: String,
@@ -280,12 +368,25 @@ class GuestRuntimeSessionSupervisor(
         guestId = session.context.guestId,
         packageName = session.context.packageName,
         state = state,
-        guestCodeStarted = false,
+        guestCodeStarted = session.report.guestInstructions > 0L,
         startedAtEpochMs = session.startedAtEpochMs,
-        diagnostic = diagnostic,
+        diagnostic = diagnostic.take(MAX_DIAGNOSTIC_LENGTH),
+        guestInstructions = session.report.guestInstructions,
+        relocationCount = session.report.relocationCount,
+        jniOnLoadVersion = session.report.jniOnLoadVersion,
+        registeredNativeCount = session.report.registeredNativeCount,
+        loadedLibraries = session.report.loadedLibraries.toList(),
+        entrypointResults = session.report.entrypointResults.toList(),
     )
 
+    private class NativeExecutionFailure(
+        message: String,
+        val report: NativeExecutionReport,
+    ) : IllegalStateException(message)
+
     companion object {
-        private const val MAX_ACTIVE_SESSIONS = 8
+        private const val MAX_ACTIVE_SESSIONS = 2
+        private const val MAX_GUEST_INSTRUCTIONS = 8_000_000L
+        private const val MAX_DIAGNOSTIC_LENGTH = 512
     }
 }

@@ -10,10 +10,7 @@ import android.os.Message
 import android.os.Messenger
 import android.os.RemoteException
 
-/**
- * Private-process runtime control endpoint. It creates and stops validated inspection contexts only;
- * no APK code, ELF image, Java class, or lifecycle callback is loaded or executed here.
- */
+/** Private-process endpoint for bounded ARM32 library loading and interpreter execution. */
 class GuestRuntimeService : Service() {
     private lateinit var handlerThread: HandlerThread
     private lateinit var requestMessenger: Messenger
@@ -55,13 +52,15 @@ class GuestRuntimeService : Service() {
         val response = Bundle().apply { putString(GuestRuntimeProtocol.KEY_REQUEST_ID, requestId) }
         try {
             when (message.what) {
-                GuestRuntimeProtocol.MESSAGE_START_INSPECTION -> startInspection(data, response)
+                GuestRuntimeProtocol.MESSAGE_LAUNCH_GUEST_RUNTIME -> launchGuestRuntime(data, response)
                 GuestRuntimeProtocol.MESSAGE_STOP_SESSION -> stopSession(data, response)
                 else -> throw IllegalArgumentException("Unsupported runtime IPC operation")
             }
         } catch (failure: Exception) {
-            response.putString(GuestRuntimeProtocol.KEY_GUEST_ID, data.getString(GuestRuntimeProtocol.KEY_GUEST_ID).orEmpty().take(64))
-            response.putString(GuestRuntimeProtocol.KEY_PACKAGE_NAME, data.getString(GuestRuntimeProtocol.KEY_PACKAGE_NAME).orEmpty().take(256))
+            response.putString(GuestRuntimeProtocol.KEY_GUEST_ID,
+                data.getString(GuestRuntimeProtocol.KEY_GUEST_ID).orEmpty().take(MAX_GUEST_ID_LENGTH))
+            response.putString(GuestRuntimeProtocol.KEY_PACKAGE_NAME,
+                data.getString(GuestRuntimeProtocol.KEY_PACKAGE_NAME).orEmpty().take(MAX_PACKAGE_NAME_LENGTH))
             response.putString(GuestRuntimeProtocol.KEY_SESSION_STATE, GuestRuntimeProtocol.STATE_REJECTED)
             response.putBoolean(GuestRuntimeProtocol.KEY_GUEST_CODE_STARTED, false)
             response.putLong(GuestRuntimeProtocol.KEY_STARTED_AT_EPOCH_MS, 0)
@@ -73,7 +72,7 @@ class GuestRuntimeService : Service() {
         sendResponse(replyTo, response)
     }
 
-    private fun startInspection(data: Bundle, response: Bundle) {
+    private fun launchGuestRuntime(data: Bundle, response: Bundle) {
         val guestId = data.getString(GuestRuntimeProtocol.KEY_GUEST_ID).orEmpty()
         val packageName = data.getString(GuestRuntimeProtocol.KEY_PACKAGE_NAME).orEmpty()
         val apkSha256 = data.getString(GuestRuntimeProtocol.KEY_APK_SHA256).orEmpty()
@@ -84,7 +83,7 @@ class GuestRuntimeService : Service() {
         ) {
             throw IllegalArgumentException("Runtime context request exceeds an IPC field limit")
         }
-        val result = supervisor.startInspectionSession(
+        val result = supervisor.startGuestRuntimeSession(
             GuestRuntimeContextRequest(
                 guestId = guestId,
                 packageName = packageName,
@@ -92,19 +91,16 @@ class GuestRuntimeService : Service() {
                 guestAbis = abis.toList(),
             ),
         )
-        response.putString(GuestRuntimeProtocol.KEY_GUEST_ID, result.guestId)
-        response.putString(GuestRuntimeProtocol.KEY_PACKAGE_NAME, result.packageName)
-        response.putString(GuestRuntimeProtocol.KEY_SESSION_ID, result.sessionId)
-        response.putString(GuestRuntimeProtocol.KEY_SESSION_STATE, result.state.name)
-        response.putBoolean(GuestRuntimeProtocol.KEY_GUEST_CODE_STARTED, result.guestCodeStarted)
-        response.putLong(GuestRuntimeProtocol.KEY_STARTED_AT_EPOCH_MS, result.startedAtEpochMs)
-        response.putString(GuestRuntimeProtocol.KEY_DIAGNOSTIC, result.diagnostic.take(MAX_DIAGNOSTIC_LENGTH))
+        putResult(response, result)
     }
 
     private fun stopSession(data: Bundle, response: Bundle) {
         val sessionId = data.getString(GuestRuntimeProtocol.KEY_SESSION_ID).orEmpty()
         if (sessionId.length > MAX_REQUEST_ID_LENGTH) throw IllegalArgumentException("Invalid runtime session ID")
-        val result = supervisor.stopSession(sessionId)
+        putResult(response, supervisor.stopSession(sessionId))
+    }
+
+    private fun putResult(response: Bundle, result: GuestRuntimeSessionResult) {
         response.putString(GuestRuntimeProtocol.KEY_GUEST_ID, result.guestId)
         response.putString(GuestRuntimeProtocol.KEY_PACKAGE_NAME, result.packageName)
         response.putString(GuestRuntimeProtocol.KEY_SESSION_ID, result.sessionId)
@@ -112,6 +108,12 @@ class GuestRuntimeService : Service() {
         response.putBoolean(GuestRuntimeProtocol.KEY_GUEST_CODE_STARTED, result.guestCodeStarted)
         response.putLong(GuestRuntimeProtocol.KEY_STARTED_AT_EPOCH_MS, result.startedAtEpochMs)
         response.putString(GuestRuntimeProtocol.KEY_DIAGNOSTIC, result.diagnostic.take(MAX_DIAGNOSTIC_LENGTH))
+        response.putLong(GuestRuntimeProtocol.KEY_GUEST_INSTRUCTIONS, result.guestInstructions)
+        response.putInt(GuestRuntimeProtocol.KEY_RELOCATION_COUNT, result.relocationCount)
+        response.putInt(GuestRuntimeProtocol.KEY_JNI_ON_LOAD_VERSION, result.jniOnLoadVersion)
+        response.putInt(GuestRuntimeProtocol.KEY_REGISTERED_NATIVE_COUNT, result.registeredNativeCount)
+        response.putStringArray(GuestRuntimeProtocol.KEY_LOADED_LIBRARIES, result.loadedLibraries.take(MAX_REPORTED_ITEMS).toTypedArray())
+        response.putStringArray(GuestRuntimeProtocol.KEY_ENTRYPOINT_RESULTS, result.entrypointResults.take(MAX_REPORTED_ITEMS).toTypedArray())
     }
 
     private fun sendResponse(replyTo: Messenger, response: Bundle) {
@@ -119,7 +121,7 @@ class GuestRuntimeService : Service() {
         try {
             replyTo.send(reply)
         } catch (_: RemoteException) {
-            // The caller may have left while a bounded validation request was in progress.
+            // The caller may have left while a bounded runtime operation was in progress.
         }
     }
 
@@ -131,5 +133,6 @@ class GuestRuntimeService : Service() {
         private const val MAX_ABI_NAME_LENGTH = 32
         private const val MAX_ABIS_PER_GUEST = 6
         private const val MAX_DIAGNOSTIC_LENGTH = 512
+        private const val MAX_REPORTED_ITEMS = 64
     }
 }

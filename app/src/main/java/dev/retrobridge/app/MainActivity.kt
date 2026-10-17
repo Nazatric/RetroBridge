@@ -114,7 +114,7 @@ class MainActivity : ComponentActivity() {
                                 apps.removeAll { it.id == imported.id }
                                 apps.add(0, imported)
                                 selectedId = imported.id
-                                snackbarHostState.showSnackbar("Imported ${imported.displayName}. Guest execution is not available yet.")
+                                snackbarHostState.showSnackbar("Imported ${imported.displayName}. Launch will attempt bounded ARM32 native execution when supported libraries are present.")
                             } catch (failure: Exception) {
                                 snackbarHostState.showSnackbar("Import failed: ${failure.message ?: "unknown error"}")
                             }
@@ -128,24 +128,21 @@ class MainActivity : ComponentActivity() {
                 }
 
                 fun startRuntimeSession(target: GuestAppRecord) {
-                    if (runtimeBusy || runtimeSessions.containsKey(target.id)) return
+                    if (runtimeBusy || runtimeSessions[target.id]?.sessionId != null) return
                     runtimeBusy = true
                     scope.launch {
                         try {
-                            val result = runtimeClient.startInspectionSession(target)
-                            if (result.state != GuestRuntimeProtocol.STATE_INSPECTION_ONLY || result.sessionId == null) {
-                                snackbarHostState.showSnackbar("Runtime context rejected: ${result.diagnostic}")
+                            val result = runtimeClient.launchGuestRuntime(target)
+                            runtimeSessions[target.id] = RuntimeSessionUi.from(result)
+                            if (result.state != GuestRuntimeProtocol.STATE_RUNNING || result.sessionId == null) {
+                                snackbarHostState.showSnackbar("Guest runtime did not launch: ${result.diagnostic}")
                             } else {
-                                runtimeSessions[target.id] = RuntimeSessionUi(
-                                    sessionId = result.sessionId,
-                                    diagnostic = result.diagnostic,
-                                )
                                 snackbarHostState.showSnackbar(
-                                    "Inspection-only runtime context active. Guest APK code was not loaded or executed.",
+                                    "ARM32 native code executed: ${result.guestInstructions} instructions across ${result.loadedLibraries.size} library/libraries.",
                                 )
                             }
                         } catch (failure: Exception) {
-                            snackbarHostState.showSnackbar("Runtime IPC failed: ${failure.message ?: "unknown error"}")
+                            snackbarHostState.showSnackbar("Guest runtime launch failed: ${failure.message ?: "unknown error"}")
                         } finally {
                             runtimeBusy = false
                         }
@@ -154,11 +151,12 @@ class MainActivity : ComponentActivity() {
 
                 fun stopRuntimeSession(target: GuestAppRecord) {
                     val current = runtimeSessions[target.id] ?: return
+                    val sessionId = current.sessionId ?: return
                     if (runtimeBusy) return
                     runtimeBusy = true
                     scope.launch {
                         try {
-                            val result = runtimeClient.stopSession(current.sessionId)
+                            val result = runtimeClient.stopSession(sessionId)
                             if (result.state == GuestRuntimeProtocol.STATE_STOPPED ||
                                 result.state == GuestRuntimeProtocol.STATE_NOT_RUNNING
                             ) {
@@ -175,7 +173,7 @@ class MainActivity : ComponentActivity() {
 
                 suspend fun stopRuntimeSessionBeforeStorageChange(target: GuestAppRecord) {
                     val current = runtimeSessions[target.id] ?: return
-                    runCatching { runtimeClient.stopSession(current.sessionId) }
+                    current.sessionId?.let { sessionId -> runCatching { runtimeClient.stopSession(sessionId) } }
                     runtimeSessions.remove(target.id)
                 }
 
@@ -457,10 +455,22 @@ private fun AppDetailsScreen(
         )
         InfoRow("Lifecycle", record.state.name.lowercase())
         InfoRow(
-            "Runtime service context",
-            if (runtimeSession == null) "Not active" else "Inspection-only context active · guest code is not running",
+            "Guest runtime",
+            runtimeSession?.state ?: "Not active",
         )
-        runtimeSession?.let { InfoRow("Runtime session", it.sessionId) }
+        runtimeSession?.sessionId?.let { InfoRow("Runtime session", it) }
+        runtimeSession?.let { InfoRow("Guest code executed", if (it.guestCodeStarted) "Yes" else "No") }
+        runtimeSession?.let { InfoRow("Guest instructions", it.guestInstructions.toString()) }
+        runtimeSession?.let { InfoRow("Applied relocations", it.relocationCount.toString()) }
+        runtimeSession?.takeIf { it.jniOnLoadVersion >= 0 }?.let {
+            InfoRow("JNI_OnLoad", "version 0x${it.jniOnLoadVersion.toUInt().toString(16)} · ${it.registeredNativeCount} native registration(s)")
+        }
+        runtimeSession?.takeIf { it.loadedLibraries.isNotEmpty() }?.let {
+            InfoRow("Loaded libraries", it.loadedLibraries.joinToString())
+        }
+        runtimeSession?.takeIf { it.entrypointResults.isNotEmpty() }?.let {
+            InfoRow("Native entrypoints", it.entrypointResults.joinToString("; "))
+        }
         runtimeSession?.let { InfoRow("Runtime diagnostic", it.diagnostic) }
         InfoRow("APK SHA-256", record.sha256)
         InfoRow("Private APK path", record.originalApkPath)
@@ -514,17 +524,18 @@ private fun AppDetailsScreen(
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
                 onClick = onStartRuntimeSession,
-                enabled = !runtimeBusy && runtimeSession == null,
-            ) { Text("Start inspection") }
+                enabled = !runtimeBusy && runtimeSession?.sessionId == null,
+            ) { Text("Launch Guest Runtime") }
             OutlinedButton(
                 onClick = onStopRuntimeSession,
-                enabled = !runtimeBusy && runtimeSession != null,
-            ) { Text("Stop session") }
+                enabled = !runtimeBusy && runtimeSession?.sessionId != null,
+            ) { Text("Stop Guest Runtime") }
         }
         OutlinedButton(onClick = onExport, modifier = Modifier.fillMaxWidth()) { Text("Export data ZIP") }
         Text(
-            "This exercises the isolated service IPC and validated app-private GuestRuntimeContext only. " +
-                "It does not load the APK, start an Activity, or execute guest code.",
+            "Launch runs only supported ARM32 native constructors, JNI_OnLoad, and selected exported entrypoints in the bounded interpreter. " +
+                "It does not execute APK Java bytecode, start an Android Activity, or virtualize the full Android framework. " +
+                "Unsupported instructions, imports, and APIs fail with diagnostics.",
             style = MaterialTheme.typography.bodySmall,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -581,8 +592,31 @@ private fun formatBytes(bytes: Long): String {
 }
 
 private data class RuntimeSessionUi(
-    val sessionId: String,
+    val sessionId: String?,
+    val state: String,
+    val guestCodeStarted: Boolean,
+    val guestInstructions: Long,
+    val relocationCount: Int,
+    val jniOnLoadVersion: Int,
+    val registeredNativeCount: Int,
+    val loadedLibraries: List<String>,
+    val entrypointResults: List<String>,
     val diagnostic: String,
-)
+) {
+    companion object {
+        fun from(reply: GuestRuntimeSessionReply) = RuntimeSessionUi(
+            sessionId = reply.sessionId,
+            state = reply.state,
+            guestCodeStarted = reply.guestCodeStarted,
+            guestInstructions = reply.guestInstructions,
+            relocationCount = reply.relocationCount,
+            jniOnLoadVersion = reply.jniOnLoadVersion,
+            registeredNativeCount = reply.registeredNativeCount,
+            loadedLibraries = reply.loadedLibraries,
+            entrypointResults = reply.entrypointResults,
+            diagnostic = reply.diagnostic,
+        )
+    }
+}
 
 private enum class PendingAction { CLEAR_DATA, REMOVE }

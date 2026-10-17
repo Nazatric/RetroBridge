@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application>
-        <!-- Private process control endpoint; only validated inspection contexts are supported. -->
+        <!-- Private process endpoint for bounded, interpreter-backed ARM32 native sessions. -->
         <service
             android:name="dev.retrobridge.runtime.GuestRuntimeService"
             android:exported="false"

@@ -38,14 +38,14 @@ class GuestRuntimeClient(context: Context) : Closeable {
         true
     })
 
-    suspend fun startInspectionSession(record: GuestAppRecord): GuestRuntimeSessionReply {
+    suspend fun launchGuestRuntime(record: GuestAppRecord): GuestRuntimeSessionReply {
         val request = Bundle().apply {
             putString(GuestRuntimeProtocol.KEY_GUEST_ID, record.id)
             putString(GuestRuntimeProtocol.KEY_PACKAGE_NAME, record.packageName)
             putString(GuestRuntimeProtocol.KEY_APK_SHA256, record.sha256)
             putStringArray(GuestRuntimeProtocol.KEY_GUEST_ABIS, record.guestAbis.toTypedArray())
         }
-        return decode(request(GuestRuntimeProtocol.MESSAGE_START_INSPECTION, request))
+        return decode(request(GuestRuntimeProtocol.MESSAGE_LAUNCH_GUEST_RUNTIME, request))
     }
 
     suspend fun stopSession(sessionId: String): GuestRuntimeSessionReply {
@@ -151,6 +151,12 @@ class GuestRuntimeClient(context: Context) : Closeable {
         guestCodeStarted = bundle.getBoolean(GuestRuntimeProtocol.KEY_GUEST_CODE_STARTED, false),
         startedAtEpochMs = bundle.getLong(GuestRuntimeProtocol.KEY_STARTED_AT_EPOCH_MS, 0),
         diagnostic = bundle.getString(GuestRuntimeProtocol.KEY_DIAGNOSTIC).orEmpty(),
+        guestInstructions = bundle.getLong(GuestRuntimeProtocol.KEY_GUEST_INSTRUCTIONS, 0),
+        relocationCount = bundle.getInt(GuestRuntimeProtocol.KEY_RELOCATION_COUNT, 0),
+        jniOnLoadVersion = bundle.getInt(GuestRuntimeProtocol.KEY_JNI_ON_LOAD_VERSION, -1),
+        registeredNativeCount = bundle.getInt(GuestRuntimeProtocol.KEY_REGISTERED_NATIVE_COUNT, 0),
+        loadedLibraries = bundle.getStringArray(GuestRuntimeProtocol.KEY_LOADED_LIBRARIES)?.toList().orEmpty(),
+        entrypointResults = bundle.getStringArray(GuestRuntimeProtocol.KEY_ENTRYPOINT_RESULTS)?.toList().orEmpty(),
     )
 
     override fun close() {
@@ -184,4 +190,10 @@ data class GuestRuntimeSessionReply(
     val guestCodeStarted: Boolean,
     val startedAtEpochMs: Long,
     val diagnostic: String,
+    val guestInstructions: Long,
+    val relocationCount: Int,
+    val jniOnLoadVersion: Int,
+    val registeredNativeCount: Int,
+    val loadedLibraries: List<String>,
+    val entrypointResults: List<String>,
 )

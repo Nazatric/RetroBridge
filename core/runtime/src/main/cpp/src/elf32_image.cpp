@@ -26,6 +26,7 @@ constexpr std::uint32_t kDynamicNull = 0;
 constexpr std::uint32_t kDynamicNeeded = 1;
 constexpr std::uint32_t kDynamicStringTable = 5;
 constexpr std::uint32_t kDynamicStringSize = 10;
+constexpr std::uint32_t kDynamicSoname = 14;
 
 [[nodiscard]] bool range_fits(std::size_t total, std::uint64_t offset, std::uint64_t length) noexcept {
     return offset <= total && length <= static_cast<std::uint64_t>(total) - offset;
@@ -192,6 +193,7 @@ std::variant<Elf32Image, ElfDiagnostic> Elf32Image::parse(
     std::optional<std::uint32_t> string_table_address;
     std::optional<std::uint32_t> string_table_size;
     std::vector<std::uint32_t> needed_offsets;
+    std::optional<std::uint32_t> soname_offset;
     bool terminated = false;
     const auto dynamic_count = dynamic.file_size / kDynamicEntrySize;
     for (std::uint32_t index = 0; index < dynamic_count; ++index) {
@@ -204,15 +206,21 @@ std::variant<Elf32Image, ElfDiagnostic> Elf32Image::parse(
             break;
         }
         if (tag == kDynamicNeeded) needed_offsets.push_back(value);
+        if (tag == kDynamicSoname) {
+            if (soname_offset.has_value() && *soname_offset != value) {
+                return fail(ElfDiagnosticCode::InvalidDynamicSection, "conflicting DT_SONAME entries");
+            }
+            soname_offset = value;
+        }
         if (tag == kDynamicStringTable) string_table_address = value;
         if (tag == kDynamicStringSize) string_table_size = value;
     }
     if (!terminated) {
         return fail(ElfDiagnosticCode::InvalidDynamicSection, "PT_DYNAMIC has no DT_NULL terminator");
     }
-    if (needed_offsets.empty()) return image;
+    if (needed_offsets.empty() && !soname_offset.has_value()) return image;
     if (!string_table_address.has_value() || !string_table_size.has_value() || *string_table_size == 0) {
-        return fail(ElfDiagnosticCode::MissingDynamicStringTable, "DT_NEEDED entries have no usable DT_STRTAB/DT_STRSZ");
+        return fail(ElfDiagnosticCode::MissingDynamicStringTable, "DT_NEEDED or DT_SONAME entries have no usable DT_STRTAB/DT_STRSZ");
     }
 
     std::optional<std::uint64_t> string_table_file_offset;
@@ -230,23 +238,37 @@ std::variant<Elf32Image, ElfDiagnostic> Elf32Image::parse(
         return fail(ElfDiagnosticCode::MissingDynamicStringTable, "DT_STRTAB is not inside a file-backed PT_LOAD segment");
     }
 
-    for (const auto name_offset : needed_offsets) {
-        if (name_offset >= *string_table_size) {
-            return fail(ElfDiagnosticCode::InvalidNeededLibraryName, "DT_NEEDED string offset exceeds DT_STRSZ");
-        }
+    const auto read_dynamic_name = [&](std::uint32_t name_offset, std::string_view tag)
+        -> std::optional<std::string> {
+        if (name_offset >= *string_table_size) return std::nullopt;
         const auto name_begin = static_cast<std::size_t>(*string_table_file_offset + name_offset);
         const auto available = static_cast<std::size_t>(*string_table_size - name_offset);
         auto name_end = name_begin;
         while (name_end < name_begin + available && file[name_end] != std::byte{0}) ++name_end;
-        if (name_end == name_begin + available || name_end == name_begin) {
-            return fail(ElfDiagnosticCode::InvalidNeededLibraryName, "DT_NEEDED string is empty or unterminated");
-        }
+        if (name_end == name_begin + available || name_end == name_begin) return std::nullopt;
         std::string name;
         name.reserve(name_end - name_begin);
         for (auto cursor = name_begin; cursor < name_end; ++cursor) {
-            name.push_back(static_cast<char>(std::to_integer<unsigned char>(file[cursor])));
+            const auto character = std::to_integer<unsigned char>(file[cursor]);
+            if (character == 0 || character < 0x20U) return std::nullopt;
+            name.push_back(static_cast<char>(character));
         }
-        image.needed_libraries_.push_back(std::move(name));
+        (void)tag;
+        return name;
+    };
+    for (const auto name_offset : needed_offsets) {
+        auto name = read_dynamic_name(name_offset, "DT_NEEDED");
+        if (!name.has_value()) {
+            return fail(ElfDiagnosticCode::InvalidNeededLibraryName, "DT_NEEDED string is empty, unterminated, or outside DT_STRSZ");
+        }
+        image.needed_libraries_.push_back(std::move(*name));
+    }
+    if (soname_offset.has_value()) {
+        auto name = read_dynamic_name(*soname_offset, "DT_SONAME");
+        if (!name.has_value()) {
+            return fail(ElfDiagnosticCode::InvalidDynamicSection, "DT_SONAME string is empty, unterminated, or outside DT_STRSZ");
+        }
+        image.soname_ = std::move(*name);
     }
 
     return image;

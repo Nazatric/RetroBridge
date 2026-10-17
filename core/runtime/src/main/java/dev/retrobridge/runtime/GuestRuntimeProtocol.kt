@@ -4,7 +4,7 @@ package dev.retrobridge.runtime
 object GuestRuntimeProtocol {
     const val ACTION_BIND = "dev.retrobridge.runtime.BIND"
 
-    const val MESSAGE_START_INSPECTION = 1
+    const val MESSAGE_LAUNCH_GUEST_RUNTIME = 1
     const val MESSAGE_STOP_SESSION = 2
     const val MESSAGE_RESPONSE = 100
 
@@ -18,9 +18,17 @@ object GuestRuntimeProtocol {
     const val KEY_GUEST_CODE_STARTED = "guest_code_started"
     const val KEY_STARTED_AT_EPOCH_MS = "started_at_epoch_ms"
     const val KEY_DIAGNOSTIC = "diagnostic"
+    const val KEY_GUEST_INSTRUCTIONS = "guest_instructions"
+    const val KEY_RELOCATION_COUNT = "relocation_count"
+    const val KEY_JNI_ON_LOAD_VERSION = "jni_on_load_version"
+    const val KEY_REGISTERED_NATIVE_COUNT = "registered_native_count"
+    const val KEY_LOADED_LIBRARIES = "loaded_libraries"
+    const val KEY_ENTRYPOINT_RESULTS = "entrypoint_results"
 
-    const val STATE_INSPECTION_ONLY = "INSPECTION_ONLY"
+    const val STATE_RUNNING = "RUNNING"
     const val STATE_STOPPED = "STOPPED"
     const val STATE_NOT_RUNNING = "NOT_RUNNING"
+    const val STATE_FAILED = "FAILED"
+    const val STATE_UNSUPPORTED = "UNSUPPORTED"
     const val STATE_REJECTED = "REJECTED"
 }

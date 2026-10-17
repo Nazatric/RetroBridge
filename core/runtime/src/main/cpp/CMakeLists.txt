@@ -13,6 +13,8 @@ set(RETROBRIDGE_RUNTIME_SOURCES
     src/guest_android_input_thunks.cpp
     src/guest_headless_gles_egl_thunks.cpp
     src/guest_opensl_thunks.cpp
+    src/native_execution_session.cpp
+    src/retrobridge_jni.cpp
     src/elf32_loader.cpp
     ../../../../../native/vfs/native_vfs_path.cpp
     ../../../../../native/vfs/native_vfs.cpp
