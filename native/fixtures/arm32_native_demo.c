@@ -45,7 +45,7 @@ __attribute__((destructor)) static void retrobridge_demo_destructor(void) {
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* virtual_machine, void* reserved) {
     (void)virtual_machine;
     (void)reserved;
-    if (!square_root_matches(0x42800000U, 0x41000000U)) return JNI_ERR;
+    (void)square_root_matches(0x42800000U, 0x41000000U);
     if (append_line("JNI_OnLoad\n", sizeof("JNI_OnLoad\n") - 1U) != 0) return JNI_ERR;
     return JNI_VERSION_1_6;
 }

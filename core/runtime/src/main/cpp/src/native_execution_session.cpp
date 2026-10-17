@@ -412,7 +412,8 @@ NativeExecutionReport NativeExecutionSession::execute(std::uint64_t instruction_
         report.jni_on_load_version = static_cast<std::int32_t>(returned_version);
         report.entrypoint_results.push_back(image.name + "!JNI_OnLoad => " + std::to_string(returned_version));
         if (!supported_version) {
-            append_diagnostic(report, image.name + " JNI_OnLoad returned an unsupported JNI version");
+            append_diagnostic(report, image.name + " JNI_OnLoad returned unsupported JNI version "
+                + std::to_string(returned_version));
             return report;
         }
         if (!jni_.pending_exception().empty()) {
