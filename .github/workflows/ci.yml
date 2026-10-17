@@ -171,6 +171,8 @@ jobs:
           set -euo pipefail
           mkdir -p diagnostics
           exec > diagnostics/emulator-setup.log 2>&1
+          set -x
+          echo "Provisioning Android emulator for instrumentation tests"
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           AVDMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
           if [[ ! -x "$SDKMANAGER" ]]; then SDKMANAGER="$(command -v sdkmanager || true)"; fi
@@ -240,7 +242,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for log in diagnostics/gradle.log diagnostics/demo-apk.log diagnostics/ctest.log diagnostics/native-build.log diagnostics/arm32-fixtures.log diagnostics/arm32-demo-dynamic-dependencies.log diagnostics/arm32-demo-disassembly.log diagnostics/arm32-vfp-disassembly.log diagnostics/arm32-interpreter-benchmark.json diagnostics/demo-apk-zipalign.log diagnostics/demo-apk-signature.log diagnostics/emulator-setup.log diagnostics/emulator.log diagnostics/emulator-instrumentation.log; do
+          for log in diagnostics/emulator-setup.log diagnostics/emulator.log diagnostics/emulator-instrumentation.log diagnostics/gradle.log diagnostics/demo-apk.log diagnostics/ctest.log diagnostics/native-build.log diagnostics/arm32-fixtures.log diagnostics/arm32-demo-dynamic-dependencies.log diagnostics/arm32-demo-disassembly.log diagnostics/arm32-vfp-disassembly.log diagnostics/arm32-interpreter-benchmark.json diagnostics/demo-apk-zipalign.log diagnostics/demo-apk-signature.log; do
             if [[ -s "$log" ]]; then
               echo "### $log (last 100 lines)" >> "$GITHUB_STEP_SUMMARY"
               echo '```text' >> "$GITHUB_STEP_SUMMARY"
