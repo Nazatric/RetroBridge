@@ -39,7 +39,7 @@ internal class GuestArchiveOperations(private val storage: GuestStorage) {
             if (compressedBytes == 0L) throw ZipException("Android/data archive is empty")
             val payload = transaction.resolve("payload")
             Files.createDirectories(payload)
-            val symlinks = ZipUnixMetadata.symlinkEntries(archive)
+            val symlinkIndexes = ZipUnixMetadata.symlinkEntryIndexes(archive, DATA_ARCHIVE_MAX_ENTRIES)
             val seenFiles = mutableSetOf<String>()
             val stagedFiles = mutableListOf<StagedFile>()
             var totalBytes = 0L
@@ -49,12 +49,13 @@ internal class GuestArchiveOperations(private val storage: GuestStorage) {
                 val entries = zip.entries()
                 while (entries.hasMoreElements()) {
                     val entry = entries.nextElement()
+                    val entryIndex = entryCount
                     entryCount += 1
+                    if (entryIndex in symlinkIndexes) {
+                        throw SecurityException("Symbolic-link ZIP entries are not accepted: ${entry.name}")
+                    }
                     if (entryCount > DATA_ARCHIVE_MAX_ENTRIES) {
                         throw IOException("Android/data archive exceeds the $DATA_ARCHIVE_MAX_ENTRIES entry limit")
-                    }
-                    if (entry.name in symlinks) {
-                        throw SecurityException("Symbolic-link ZIP entries are not accepted: ${entry.name}")
                     }
                     val relative = normalizeDataEntry(entry.name) ?: continue
                     val target = safeResolve(payload, relative)
@@ -118,7 +119,7 @@ internal class GuestArchiveOperations(private val storage: GuestStorage) {
             if (compressedBytes == 0L) throw ZipException("OBB archive is empty")
             val payload = transaction.resolve("payload")
             Files.createDirectories(payload)
-            val symlinks = ZipUnixMetadata.symlinkEntries(archive)
+            val symlinkIndexes = ZipUnixMetadata.symlinkEntryIndexes(archive, OBB_BUNDLE_MAX_ENTRIES)
             val names = mutableSetOf<String>()
             val stagedFiles = mutableListOf<StagedFile>()
             var uncompressedBytes = 0L
@@ -128,12 +129,13 @@ internal class GuestArchiveOperations(private val storage: GuestStorage) {
                 val enumeration = zip.entries()
                 while (enumeration.hasMoreElements()) {
                     val entry = enumeration.nextElement()
+                    val entryIndex = entries
                     entries += 1
+                    if (entryIndex in symlinkIndexes) {
+                        throw SecurityException("Symbolic-link ZIP entries are not accepted: ${entry.name}")
+                    }
                     if (entries > OBB_BUNDLE_MAX_ENTRIES) {
                         throw IOException("OBB archive exceeds the $OBB_BUNDLE_MAX_ENTRIES entry limit")
-                    }
-                    if (entry.name in symlinks) {
-                        throw SecurityException("Symbolic-link ZIP entries are not accepted: ${entry.name}")
                     }
                     if (entry.isDirectory) {
                         validateObbArchivePrefix(validateArchivePath(entry.name, allowTrailingSlash = true))
@@ -176,46 +178,82 @@ internal class GuestArchiveOperations(private val storage: GuestStorage) {
             appRoot.resolve("obb"),
         )
         val files = mutableListOf<Path>()
+        var visitedPaths = 0
         includedRoots.forEach { root ->
             if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) return@forEach
             rejectSymlink(root)
             Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
+                override fun preVisitDirectory(directory: Path, attrs: BasicFileAttributes): FileVisitResult {
+                    visitedPaths += 1
+                    if (visitedPaths > EXPORT_MAX_VISITED_PATHS) {
+                        throw IOException("Guest data exceeds the export path-count limit")
+                    }
+                    return FileVisitResult.CONTINUE
+                }
+
                 override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                    visitedPaths += 1
+                    if (visitedPaths > EXPORT_MAX_VISITED_PATHS) {
+                        throw IOException("Guest data exceeds the export path-count limit")
+                    }
                     if (attrs.isSymbolicLink) throw SecurityException("Cannot export a symbolic link: $file")
-                    if (attrs.isRegularFile) files.add(file)
+                    if (attrs.isRegularFile) {
+                        if (files.size >= EXPORT_MAX_FILES) {
+                            throw IOException("Guest data exceeds the $EXPORT_MAX_FILES-file export limit")
+                        }
+                        files.add(file)
+                    }
                     return FileVisitResult.CONTINUE
                 }
             })
         }
-        val orderedFiles = files.sortedBy { appRoot.relativize(it).toPortablePath() }
-        val total = orderedFiles.fold(0L) { acc, file -> Math.addExact(acc, Files.size(file)) }
+        val exportFiles = files
+            .sortedBy { appRoot.relativize(it).toPortablePath() }
+            .map { file ->
+                val relativePath = appRoot.relativize(file).toPortablePath()
+                validateArchivePath(relativePath, allowTrailingSlash = false)
+                ExportFile(file, relativePath, Files.size(file))
+            }
+        val total = exportFiles.fold(0L) { acc, file -> Math.addExact(acc, file.size) }
         if (total > EXPORT_MAX_BYTES) throw IOException("Guest data exceeds the export quota")
-        val obbFiles = orderedFiles
-            .map { appRoot.relativize(it).toPortablePath() }
-            .filter { it.startsWith("obb/") }
-        val manifest = buildManifest(orderedFiles, obbFiles)
+        val obbFiles = exportFiles.map { it.relativePath }.filter { it.startsWith("obb/") }
+        val manifest = buildManifest(exportFiles, obbFiles)
+        var streamedBytes = 0L
 
         ZipOutputStream(output, StandardCharsets.UTF_8).use { zip ->
             val manifestEntry = ZipEntry("manifest.json").apply { time = 0L }
             zip.putNextEntry(manifestEntry)
             zip.write(manifest.toByteArray(StandardCharsets.UTF_8))
             zip.closeEntry()
-            orderedFiles.forEach { file ->
-                rejectSymlink(file)
-                rejectSymlinkComponents(appRoot, file)
-                val entryName = appRoot.relativize(file).toPortablePath()
-                zip.putNextEntry(ZipEntry(entryName).apply { time = 0L })
-                Files.newInputStream(file).use { source -> source.copyTo(zip, DEFAULT_BUFFER_SIZE) }
+            exportFiles.forEach { exportFile ->
+                rejectSymlink(exportFile.path)
+                rejectSymlinkComponents(appRoot, exportFile.path)
+                if (Files.size(exportFile.path) != exportFile.size) {
+                    throw IOException("Guest file changed while preparing export: ${exportFile.relativePath}")
+                }
+                zip.putNextEntry(ZipEntry(exportFile.relativePath).apply { time = 0L })
+                val copied = Files.newInputStream(exportFile.path).use { source ->
+                    copyLimitedToZip(
+                        source = source,
+                        output = zip,
+                        perFileLimit = exportFile.size,
+                        remainingTotalLimit = EXPORT_MAX_BYTES - streamedBytes,
+                    )
+                }
+                if (copied != exportFile.size) {
+                    throw IOException("Guest file changed while exporting: ${exportFile.relativePath}")
+                }
+                streamedBytes = Math.addExact(streamedBytes, copied)
                 zip.closeEntry()
             }
         }
-        return GuestExportResult(orderedFiles.size, total, obbFiles)
+        if (streamedBytes != total) throw IOException("Guest data changed while exporting")
+        return GuestExportResult(exportFiles.size, streamedBytes, obbFiles)
     }
 
-    private fun buildManifest(files: List<Path>, obbFiles: List<String>): String {
+    private fun buildManifest(files: List<ExportFile>, obbFiles: List<String>): String {
         val inventory = files.joinToString(",") { file ->
-            val path = appRoot.relativize(file).toPortablePath()
-            "{\"path\":${jsonString(path)},\"size\":${Files.size(file)}}"
+            "{\"path\":${jsonString(file.relativePath)},\"size\":${file.size}}"
         }
         val obb = obbFiles.joinToString(",") { jsonString(it) }
         return "{\"format\":1,\"packageName\":${jsonString(storage.packageName)}," +
@@ -304,11 +342,17 @@ internal class GuestArchiveOperations(private val storage: GuestStorage) {
         if (raw.isEmpty() || raw.startsWith('/') || raw.startsWith('\\') || '\u0000' in raw || '\\' in raw) {
             throw SecurityException("Unsafe ZIP entry path: $raw")
         }
+        if (raw.toByteArray(StandardCharsets.UTF_8).size > MAX_ARCHIVE_PATH_BYTES) {
+            throw SecurityException("ZIP entry path exceeds the $MAX_ARCHIVE_PATH_BYTES-byte path limit")
+        }
         val path = if (allowTrailingSlash) raw.removeSuffix("/") else raw
         if (path.isEmpty()) return emptyList()
         val components = path.split('/')
-        if (components.any { it.isBlank() || it == "." || it == ".." || it.contains(':') }) {
-            throw SecurityException("ZIP entry contains an unsafe path segment: $raw")
+        if (components.any {
+                it.isBlank() || it == "." || it == ".." || it.contains(':') ||
+                    it.toByteArray(StandardCharsets.UTF_8).size > MAX_ARCHIVE_COMPONENT_BYTES
+            }) {
+            throw SecurityException("ZIP entry contains an unsafe or overlong path segment: $raw")
         }
         return components
     }
@@ -316,6 +360,9 @@ internal class GuestArchiveOperations(private val storage: GuestStorage) {
     private fun validateObbName(filename: String) {
         if (filename.contains('/') || filename.contains('\\') || filename.contains('\u0000')) {
             throw SecurityException("OBB filename must be a single path component")
+        }
+        if (filename.toByteArray(StandardCharsets.UTF_8).size > MAX_ARCHIVE_COMPONENT_BYTES) {
+            throw SecurityException("OBB filename exceeds the $MAX_ARCHIVE_COMPONENT_BYTES-byte filename limit")
         }
         val pattern = Regex("^(main|patch)\\.([1-9][0-9]*)\\.${Regex.escape(storage.packageName)}\\.obb$")
         if (!pattern.matches(filename)) {
@@ -343,7 +390,16 @@ internal class GuestArchiveOperations(private val storage: GuestStorage) {
             while (true) {
                 val count = input.read(buffer)
                 if (count < 0) break
-                if (count == 0) continue
+                if (count == 0) {
+                    val value = input.read()
+                    if (value < 0) break
+                    if (copied >= perFileLimit || copied >= remainingTotalLimit) {
+                        throw IOException("Archive exceeds configured decompression quota")
+                    }
+                    output.write(value)
+                    copied += 1
+                    continue
+                }
                 val amount = count.toLong()
                 if (copied > perFileLimit - amount || copied > remainingTotalLimit - amount) {
                     throw IOException("Archive exceeds configured decompression quota")
@@ -351,6 +407,38 @@ internal class GuestArchiveOperations(private val storage: GuestStorage) {
                 output.write(buffer, 0, count)
                 copied += amount
             }
+        }
+        return copied
+    }
+
+    private fun copyLimitedToZip(
+        source: InputStream,
+        output: OutputStream,
+        perFileLimit: Long,
+        remainingTotalLimit: Long,
+    ): Long {
+        if (remainingTotalLimit < 0) throw IOException("Export exceeds configured byte quota")
+        var copied = 0L
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        while (true) {
+            val count = source.read(buffer)
+            if (count < 0) break
+            if (count == 0) {
+                val value = source.read()
+                if (value < 0) break
+                if (copied >= perFileLimit || copied >= remainingTotalLimit) {
+                    throw IOException("Export exceeds configured byte quota")
+                }
+                output.write(value)
+                copied += 1
+                continue
+            }
+            val amount = count.toLong()
+            if (copied > perFileLimit - amount || copied > remainingTotalLimit - amount) {
+                throw IOException("Export exceeds configured byte quota")
+            }
+            output.write(buffer, 0, count)
+            copied += amount
         }
         return copied
     }
@@ -422,6 +510,7 @@ internal class GuestArchiveOperations(private val storage: GuestStorage) {
     private fun Path.toPortablePath(): String = toString().replace(java.io.File.separatorChar, '/')
 
     private data class StagedFile(val relativePath: String, val stagedPath: Path)
+    private data class ExportFile(val path: Path, val relativePath: String, val size: Long)
     private data class Replacement(val destination: Path, val backup: Path?)
 
     companion object {
@@ -435,6 +524,10 @@ internal class GuestArchiveOperations(private val storage: GuestStorage) {
         private const val OBB_BUNDLE_MAX_UNCOMPRESSED_BYTES = 16L * 1024 * 1024 * 1024
         private const val OBB_BUNDLE_MAX_ENTRIES = 256
         private const val EXPORT_MAX_BYTES = 16L * 1024 * 1024 * 1024
+        private const val EXPORT_MAX_FILES = 49_999
+        private const val EXPORT_MAX_VISITED_PATHS = 50_000
+        private const val MAX_ARCHIVE_PATH_BYTES = 1024
+        private const val MAX_ARCHIVE_COMPONENT_BYTES = 255
     }
 }
 
@@ -443,8 +536,9 @@ private object ZipUnixMetadata {
     private const val EOCD_SIGNATURE = 0x06054b50L
     private const val CENTRAL_SIGNATURE = 0x02014b50L
     private const val MAX_EOCD_SEARCH = 22 + 65_535
+    private const val MAX_CENTRAL_DIRECTORY_BYTES = 64L * 1024 * 1024
 
-    fun symlinkEntries(path: Path): Set<String> = RandomAccessFile(path.toFile(), "r").use { file ->
+    fun symlinkEntryIndexes(path: Path, maxEntries: Int): Set<Int> = RandomAccessFile(path.toFile(), "r").use { file ->
         val length = file.length()
         if (length < 22) throw ZipException("ZIP end record is missing")
         val searchLength = minOf(length, MAX_EOCD_SEARCH.toLong()).toInt()
@@ -474,29 +568,35 @@ private object ZipUnixMetadata {
         if (totalEntries == 0xffff || centralSize == 0xffffffffL || centralOffset == 0xffffffffL) {
             throw ZipException("ZIP64 central directories are not accepted by this importer")
         }
-        if (centralOffset + centralSize > length) throw ZipException("ZIP central directory is out of bounds")
+        if (totalEntries > maxEntries) throw ZipException("ZIP archive exceeds the $maxEntries entry limit")
+        if (centralSize > MAX_CENTRAL_DIRECTORY_BYTES) {
+            throw ZipException("ZIP central directory exceeds the $MAX_CENTRAL_DIRECTORY_BYTES-byte metadata limit")
+        }
+        val centralEnd = centralOffset + centralSize
+        if (centralEnd > length) throw ZipException("ZIP central directory is out of bounds")
 
-        val result = mutableSetOf<String>()
+        val result = mutableSetOf<Int>()
         file.seek(centralOffset)
-        repeat(totalEntries) {
+        repeat(totalEntries) { entryIndex ->
+            if (file.filePointer + 46 > centralEnd) {
+                throw ZipException("ZIP central directory entry is truncated")
+            }
             val header = ByteArray(46)
             file.readFully(header)
             if (u32(header, 0) != CENTRAL_SIGNATURE) throw ZipException("Malformed ZIP central directory")
             val madeBy = u16(header, 4)
-            val flags = u16(header, 8)
             val nameLength = u16(header, 28)
             val extraLength = u16(header, 30)
             val commentLength = u16(header, 32)
             val externalAttributes = u32(header, 38)
-            val nameBytes = ByteArray(nameLength)
-            file.readFully(nameBytes)
-            val charset = if ((flags and (1 shl 11)) != 0) StandardCharsets.UTF_8 else Charset.forName("CP437")
-            val name = String(nameBytes, charset)
+            val entryEnd = file.filePointer + nameLength + extraLength + commentLength
+            if (entryEnd > centralEnd) throw ZipException("ZIP central directory entry exceeds its declared bounds")
             val unixSystem = (madeBy ushr 8) == 3
             val unixMode = (externalAttributes ushr 16).toInt()
-            if (unixSystem && (unixMode and 0xf000) == 0xa000) result += name
-            file.seek(file.filePointer + extraLength + commentLength)
+            if (unixSystem && (unixMode and 0xf000) == 0xa000) result += entryIndex
+            file.seek(entryEnd)
         }
+        if (file.filePointer > centralEnd) throw ZipException("ZIP central directory entry exceeds its declared bounds")
         result
     }
 

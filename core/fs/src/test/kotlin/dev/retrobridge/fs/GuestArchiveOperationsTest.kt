@@ -8,6 +8,8 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.io.InputStream
 import java.nio.file.Files
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
@@ -84,6 +86,55 @@ class GuestArchiveOperationsTest {
             storage.importObbBundle(ByteArrayInputStream(wrongPackageBundle))
         }
         assertFalse(Files.exists(storage.layout.obb.resolve("main.8.org.example.expansion.obb")))
+    }
+
+    @Test
+    fun rejectsObbBundlesOverEntryQuotaBeforeOpeningZipEntries() {
+        val storage = newStorage("org.example.entrylimit")
+        val archive = ByteArrayOutputStream()
+        ZipOutputStream(archive).use { zip ->
+            (1..257).forEach { version ->
+                zip.putNextEntry(ZipEntry("main.$version.org.example.entrylimit.obb"))
+                zip.closeEntry()
+            }
+        }
+
+        val failure = assertThrows(IOException::class.java) {
+            storage.importObbBundle(ByteArrayInputStream(archive.toByteArray()))
+        }
+        assertTrue(failure.message.orEmpty().contains("256 entry limit"))
+        assertTrue(Files.list(storage.layout.obb).use { paths -> paths.count() == 0L })
+    }
+
+    @Test
+    fun handlesInputStreamsThatReturnZeroForBulkReads() {
+        val storage = newStorage("org.example.zeroread")
+        val expected = byteArrayOf(0, 1, 2, 0xff.toByte())
+        val input = object : InputStream() {
+            private var offset = 0
+
+            override fun read(): Int {
+                if (offset >= expected.size) return -1
+                return expected[offset++].toInt() and 0xff
+            }
+
+            override fun read(buffer: ByteArray, start: Int, length: Int): Int = 0
+        }
+
+        storage.importObbFile(input, "main.1.org.example.zeroread.obb")
+
+        assertArrayEquals(expected, Files.readAllBytes(storage.layout.obb.resolve("main.1.org.example.zeroread.obb")))
+    }
+
+    @Test
+    fun rejectsOverlongArchivePathComponents() {
+        val storage = newStorage("org.example.longpath")
+        val archive = zipOf("${"a".repeat(256)}.dat" to byteArrayOf(1))
+
+        assertThrows(SecurityException::class.java) {
+            storage.importAndroidDataArchive(ByteArrayInputStream(archive))
+        }
+        assertTrue(Files.list(storage.layout.externalData).use { paths -> paths.count() == 0L })
     }
 
     @Test
