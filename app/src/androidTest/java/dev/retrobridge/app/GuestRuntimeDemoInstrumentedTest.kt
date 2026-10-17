@@ -46,7 +46,7 @@ class GuestRuntimeDemoInstrumentedTest {
             assertTrue(launched.loadedLibraries.any { it.contains("libretrobridge_demo.so") })
             assertTrue(launched.entrypointResults.any { it.contains("retrobridge_main => 42") })
 
-            val runningOutput = Files.readString(output)
+            val runningOutput = String(Files.readAllBytes(output), Charsets.UTF_8)
             assertTrue(runningOutput.contains("constructor\n"))
             assertTrue(runningOutput.contains("JNI_OnLoad\n"))
             assertTrue(runningOutput.contains("entrypoint\n"))
@@ -61,7 +61,7 @@ class GuestRuntimeDemoInstrumentedTest {
             assertTrue(stopped.guestCodeStarted)
             assertTrue(stopped.diagnostic.contains("destructors", ignoreCase = true))
 
-            val stoppedOutput = Files.readString(output)
+            val stoppedOutput = String(Files.readAllBytes(output), Charsets.UTF_8)
             assertTrue(stoppedOutput.endsWith("destructor\n"))
             assertTrue(stoppedOutput.indexOf("entrypoint\n") < stoppedOutput.indexOf("destructor\n"))
         } finally {
