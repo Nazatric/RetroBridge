@@ -62,8 +62,13 @@ int main(int argc, char** argv) {
             } else {
                 const auto report = session.execute(2'000'000);
                 if (!report.success) {
+                    session.stop();
+                    const auto output_path = root / "internal/files/native-demo.txt";
+                    std::ifstream output(output_path);
+                    const std::string observed_output((std::istreambuf_iterator<char>(output)), std::istreambuf_iterator<char>());
                     result_code = fail("interpreter execution: "
-                        + (report.diagnostics.empty() ? std::string("no diagnostic") : report.diagnostics.front()));
+                        + (report.diagnostics.empty() ? std::string("no diagnostic") : report.diagnostics.front())
+                        + "; guest VFS output=[" + (observed_output.empty() ? std::string("<empty>") : observed_output) + "]");
                 } else {
                     if (report.guest_instructions == 0) result_code = fail("no guest machine instructions were executed");
                     if (report.relocation_count == 0) result_code = fail("the shared object reported no applied relocations");
