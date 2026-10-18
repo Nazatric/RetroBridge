@@ -2907,12 +2907,23 @@ void test_a32_t32_execution_svc_and_trampolines() {
     thumb_register_offset_state.r[8] = 0x5aU;
     const auto thumb_register_offset_result = interpreter.run(
         thumb_register_offset_state, GuestAddress32{0x3401}, 16);
-    check(thumb_register_offset_result.status == ExecutionStatus::Completed
-            && thumb_register_offset_state.r[3] == 0x11223344U
-            && thumb_register_offset_state.r[4] == 0x44U
-            && thumb_register_offset_state.r[6] == 0xffff8001U
-            && thumb_register_offset_state.r[9] == 0x5aU
-            && memory.read_u32(GuestAddress32{0x3808}).value_or(0) == 0x11223344U,
+    const auto register_offset_word = memory.read_u32(GuestAddress32{0x3808}).value_or(0);
+    const bool register_offset_passed = thumb_register_offset_result.status == ExecutionStatus::Completed
+        && thumb_register_offset_state.r[3] == 0x11223344U
+        && thumb_register_offset_state.r[4] == 0x44U
+        && thumb_register_offset_state.r[6] == 0xffff8001U
+        && thumb_register_offset_state.r[9] == 0x5aU
+        && register_offset_word == 0x11223344U;
+    if (!register_offset_passed) {
+        std::cerr << "T32 register-offset diagnostics: status=" << static_cast<int>(thumb_register_offset_result.status)
+            << " diagnostic=\"" << thumb_register_offset_result.diagnostic << '\"'
+            << " r3=0x" << std::hex << thumb_register_offset_state.r[3]
+            << " r4=0x" << thumb_register_offset_state.r[4]
+            << " r6=0x" << thumb_register_offset_state.r[6]
+            << " r9=0x" << thumb_register_offset_state.r[9]
+            << " mem=0x" << register_offset_word << std::dec << '\n';
+    }
+    check(register_offset_passed,
         "T32 register-offset word/byte transfers apply scaled indices and signed halfword loads");
 
     check(memory.map_zeroed(GuestAddress32{0xa000}, 0x1000,
