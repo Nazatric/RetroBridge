@@ -536,17 +536,17 @@ void write_vfp_double(GuestCpuState32& state, unsigned index, std::uint64_t valu
         const bool immediate_offset = (instruction & (1U << 22U)) != 0;
         const bool encoded_writeback = (instruction & (1U << 21U)) != 0;
         const bool writeback = encoded_writeback || !pre_index;
-        const bool load = (instruction & (1U << 20U)) != 0;
+        const bool encoded_load = (instruction & (1U << 20U)) != 0;
         const auto rn = (instruction >> 16U) & 0xfU;
         const auto rd = (instruction >> 12U) & 0xfU;
         const auto operation = (instruction >> 5U) & 3U;
-        if (!pre_index && encoded_writeback) return fault("A32 unprivileged halfword transfer is unsupported");
+        if (!pre_index && encoded_writeback) return fault("A32 unprivileged halfword/doubleword transfer is unsupported");
         unsigned transfer_size = 2;
         bool signed_load = false;
         bool doubleword_transfer = false;
         if (operation == 0U) return fault("unsupported A32 swap transfer encoding");
         if (operation == 2U) {
-            if (load) {
+            if (encoded_load) {
                 transfer_size = 1;
                 signed_load = true;
             } else {
@@ -554,13 +554,15 @@ void write_vfp_double(GuestCpuState32& state, unsigned index, std::uint64_t valu
                 doubleword_transfer = true;
             }
         } else if (operation == 3U) {
-            if (load) {
+            if (encoded_load) {
                 signed_load = true;
             } else {
                 transfer_size = 8;
                 doubleword_transfer = true;
             }
         }
+        // In the extra-transfer encoding, operation 10 with L=0 is LDRD rather than a store.
+        const bool load = encoded_load || (doubleword_transfer && operation == 2U);
         if (rn == 15U || rd == 15U || (doubleword_transfer && ((rd & 1U) != 0 || rd > 12U))) {
             return fault("A32 halfword/doubleword transfer uses an unsupported PC or register pair");
         }
