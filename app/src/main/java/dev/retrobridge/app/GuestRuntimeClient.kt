@@ -44,6 +44,11 @@ class GuestRuntimeClient(context: Context) : Closeable {
             putString(GuestRuntimeProtocol.KEY_PACKAGE_NAME, record.packageName)
             putString(GuestRuntimeProtocol.KEY_APK_SHA256, record.sha256)
             putStringArray(GuestRuntimeProtocol.KEY_GUEST_ABIS, record.guestAbis.toTypedArray())
+            putString(GuestRuntimeProtocol.KEY_APPLICATION_LABEL, record.displayName)
+            putString(GuestRuntimeProtocol.KEY_VERSION_NAME, record.versionName)
+            putLong(GuestRuntimeProtocol.KEY_VERSION_CODE, record.versionCode)
+            putInt(GuestRuntimeProtocol.KEY_MIN_SDK, record.minSdk ?: 0)
+            putInt(GuestRuntimeProtocol.KEY_TARGET_SDK, record.targetSdk ?: 0)
         }
         return decode(request(GuestRuntimeProtocol.MESSAGE_LAUNCH_GUEST_RUNTIME, request))
     }

@@ -9,6 +9,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -20,6 +21,9 @@ class GuestRuntimeContextTest {
         val context = GuestRuntimeContextFactory.create(fixture.privateRoot, fixture.request)
 
         assertEquals(fixture.packageName, context.packageName)
+        assertEquals("RetroBridge Fixture", context.packageMetadata.applicationLabel)
+        assertEquals("2.7", context.packageMetadata.versionName)
+        assertEquals(207L, context.packageMetadata.versionCode)
         assertEquals(fixture.appRoot.resolve("app/base.apk"), context.apkPath)
         assertEquals(fixture.appRoot.resolve("internal/files/save.dat"), context.resolveGuestPath(
             "/data/data/${fixture.packageName}/files/save.dat",
@@ -31,7 +35,95 @@ class GuestRuntimeContextTest {
             "/sdcard/Android/obb/${fixture.packageName}/main.1.${fixture.packageName}.obb",
         ))
         assertTrue(GuestFrameworkCapability.APP_PRIVATE_PATH_MAPPING in context.frameworkCapabilities)
+        assertTrue(GuestFrameworkCapability.GUEST_SHARED_PREFERENCES in context.frameworkCapabilities)
+        assertTrue(GuestFrameworkCapability.BOUNDED_APK_ASSET_READS in context.frameworkCapabilities)
         assertTrue(context.nativeExecutionLimitations.contains("Java bytecode"))
+    }
+
+    @Test
+    fun contextFacadeProvidesGuestPathsPreferencesAssetsAndOnePackageSnapshot() {
+        val fixture = newGuestFixture()
+        val context = GuestRuntimeContextFactory.create(fixture.privateRoot, fixture.request)
+        val wrapper = GuestContextWrapper(context)
+        wrapper.prepareStorageDirectories()
+
+        assertEquals(fixture.appRoot.resolve("internal/files"), wrapper.filesDir)
+        assertEquals(fixture.appRoot.resolve("internal/cache"), wrapper.cacheDir)
+        assertEquals(fixture.appRoot.resolve("internal/shared_prefs"), wrapper.sharedPreferencesDir)
+        assertEquals(fixture.appRoot.resolve("external/data/files/Pictures"), wrapper.externalFilesDir("Pictures"))
+        assertEquals(fixture.appRoot.resolve("external/data/cache"), wrapper.externalCacheDir)
+        assertEquals(fixture.appRoot.resolve("obb"), wrapper.obbDir)
+        assertTrue(Files.isDirectory(wrapper.noBackupFilesDir))
+        assertTrue(Files.isDirectory(wrapper.codeCacheDir))
+
+        wrapper.openFileOutput("save.dat").use { it.write("native-state".toByteArray()) }
+        assertEquals("native-state", wrapper.openFileInput("save.dat").bufferedReader().use { it.readText() })
+        assertEquals(listOf("save.dat"), wrapper.fileList())
+        assertTrue(wrapper.deleteFile("save.dat"))
+        assertFalse(wrapper.deleteFile("save.dat"))
+        assertThrows(IllegalArgumentException::class.java) { wrapper.openFileOutput("../outside") }
+
+        val preferences = wrapper.getSharedPreferences("settings")
+        assertTrue(preferences.putString("theme", "dark"))
+        assertTrue(preferences.putInt("launches", 7))
+        assertTrue(preferences.putBoolean("enabled", true))
+        assertTrue(preferences.putStringSet("tags", setOf("native", "fixture")))
+        val reopenedPreferences = GuestContextWrapper(context).getSharedPreferences("settings")
+        assertEquals("dark", reopenedPreferences.getString("theme"))
+        assertEquals(7, reopenedPreferences.getInt("launches"))
+        assertTrue(reopenedPreferences.getBoolean("enabled"))
+        assertEquals(setOf("native", "fixture"), reopenedPreferences.getStringSet("tags"))
+        assertThrows(ClassCastException::class.java) { reopenedPreferences.getLong("launches") }
+        assertThrows(IllegalArgumentException::class.java) { wrapper.getSharedPreferences("../host") }
+
+        assertEquals("retrobridge-test-apk", String(wrapper.readAsset("identity.txt"), Charsets.UTF_8))
+        assertThrows(IllegalArgumentException::class.java) { wrapper.readAsset("../identity.txt") }
+        assertThrows(java.io.FileNotFoundException::class.java) { wrapper.readAsset("missing.txt") }
+
+        val packageInfo = wrapper.packageManager.getPackageInfo(fixture.packageName)
+        assertEquals("RetroBridge Fixture", packageInfo?.applicationLabel)
+        assertEquals("2.7", packageInfo?.versionName)
+        assertEquals(207L, packageInfo?.versionCode)
+        assertEquals(23, packageInfo?.minSdk ?: -1)
+        assertEquals(35, packageInfo?.targetSdk ?: -1)
+        assertNull(wrapper.packageManager.getPackageInfo("org.example.other"))
+        assertThrows(IllegalArgumentException::class.java) { wrapper.externalFilesDir("../escape") }
+    }
+
+    @Test
+    fun preferencesRejectCorruptOrSymlinkedFiles() {
+        val fixture = newGuestFixture()
+        val context = GuestRuntimeContextFactory.create(fixture.privateRoot, fixture.request)
+        val wrapper = GuestContextWrapper(context)
+        val preferencesDirectory = wrapper.sharedPreferencesDir
+        val corruptFile = preferencesDirectory.resolve("corrupt.guestprefs")
+        Files.write(corruptFile, byteArrayOf(1, 2, 3))
+        assertThrows(java.io.IOException::class.java) {
+            GuestContextWrapper(context).getSharedPreferences("corrupt")
+        }
+
+        val outside = Files.createTempFile("retrobridge-preferences-outside", ".bin")
+        val symlink = preferencesDirectory.resolve("linked.guestprefs")
+        try {
+            Files.createSymbolicLink(symlink, outside)
+        } catch (_: UnsupportedOperationException) {
+            Files.deleteIfExists(outside)
+            return
+        } catch (_: java.io.IOException) {
+            Files.deleteIfExists(outside)
+            return
+        } catch (_: SecurityException) {
+            Files.deleteIfExists(outside)
+            return
+        }
+        try {
+            assertThrows(SecurityException::class.java) {
+                GuestContextWrapper(context).getSharedPreferences("linked")
+            }
+        } finally {
+            Files.deleteIfExists(symlink)
+            Files.deleteIfExists(outside)
+        }
     }
 
     @Test
@@ -49,6 +141,14 @@ class GuestRuntimeContextTest {
             GuestRuntimeContextFactory.create(
                 fixture.privateRoot,
                 fixture.request.copy(apkSha256 = "0".repeat(64)),
+            )
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            GuestRuntimeContextFactory.create(
+                fixture.privateRoot,
+                fixture.request.copy(
+                    packageMetadata = fixture.request.packageMetadata.copy(packageName = "org.example.other"),
+                ),
             )
         }
     }
@@ -159,6 +259,14 @@ class GuestRuntimeContextTest {
                 packageName = packageName,
                 apkSha256 = digest,
                 guestAbis = listOf("armeabi-v7a"),
+                packageMetadata = GuestPackageMetadata(
+                    packageName = packageName,
+                    applicationLabel = "RetroBridge Fixture",
+                    versionName = "2.7",
+                    versionCode = 207L,
+                    minSdk = 23,
+                    targetSdk = 35,
+                ),
             ),
         )
     }

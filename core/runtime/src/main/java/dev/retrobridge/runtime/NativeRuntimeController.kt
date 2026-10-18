@@ -10,14 +10,16 @@ interface NativeRuntimeController {
 }
 
 object JniNativeRuntimeController : NativeRuntimeController {
-    override fun createSession(context: GuestRuntimeContext): Long =
-        RetroBridgeNativeBridge.nativeCreateSession(
-            context.packageName,
-            context.internalRoot.toString(),
-            context.externalDataRoot.toString(),
-            context.obbRoot.toString(),
+    override fun createSession(context: GuestRuntimeContext): Long {
+        val guestContext = GuestContextWrapper(context).apply { prepareStorageDirectories() }
+        return RetroBridgeNativeBridge.nativeCreateSession(
+            guestContext.packageName,
+            guestContext.dataDir.toString(),
+            guestContext.externalDataDir.toString(),
+            guestContext.obbDir.toString(),
             context.appRoot.resolve("runtime/native").toString(),
         )
+    }
 
     override fun inspectLibrary(sessionId: Long, libraryPath: String): NativeLibraryMetadata =
         RetroBridgeNativeBridge.nativeInspectLibrary(sessionId, libraryPath)

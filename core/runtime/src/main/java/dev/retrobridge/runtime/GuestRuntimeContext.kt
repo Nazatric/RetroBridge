@@ -7,15 +7,26 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.UUID
 
+/** Immutable package metadata collected from the imported APK manifest. */
+data class GuestPackageMetadata(
+    val packageName: String,
+    val applicationLabel: String,
+    val versionName: String? = null,
+    val versionCode: Long = 0,
+    val minSdk: Int? = null,
+    val targetSdk: Int? = null,
+)
+
 /**
  * App-private guest storage and identity passed to the interpreter-backed ARM32 runtime. It does
- * not wrap android.content.Context or expose host objects; it is not a virtual Android framework.
+ * not itself wrap android.content.Context or expose host objects; it is not a virtual Android framework.
  */
 class GuestRuntimeContext internal constructor(
     val guestId: String,
     val packageName: String,
     val apkSha256: String,
     val guestAbis: List<String>,
+    val packageMetadata: GuestPackageMetadata,
     val appRoot: Path,
     val apkPath: Path,
     val internalRoot: Path,
@@ -24,7 +35,11 @@ class GuestRuntimeContext internal constructor(
 ) {
     val frameworkCapabilities: Set<GuestFrameworkCapability> = setOf(
         GuestFrameworkCapability.PACKAGE_IDENTITY,
+        GuestFrameworkCapability.PACKAGE_METADATA_SNAPSHOT,
         GuestFrameworkCapability.APP_PRIVATE_PATH_MAPPING,
+        GuestFrameworkCapability.GUEST_CONTEXT_STORAGE_FACADE,
+        GuestFrameworkCapability.GUEST_SHARED_PREFERENCES,
+        GuestFrameworkCapability.BOUNDED_APK_ASSET_READS,
     )
 
     val nativeExecutionLimitations: String =
@@ -82,7 +97,11 @@ class GuestRuntimeContext internal constructor(
 
 enum class GuestFrameworkCapability {
     PACKAGE_IDENTITY,
+    PACKAGE_METADATA_SNAPSHOT,
     APP_PRIVATE_PATH_MAPPING,
+    GUEST_CONTEXT_STORAGE_FACADE,
+    GUEST_SHARED_PREFERENCES,
+    BOUNDED_APK_ASSET_READS,
 }
 
 data class GuestRuntimeContextRequest(
@@ -90,6 +109,10 @@ data class GuestRuntimeContextRequest(
     val packageName: String,
     val apkSha256: String,
     val guestAbis: List<String>,
+    val packageMetadata: GuestPackageMetadata = GuestPackageMetadata(
+        packageName = packageName,
+        applicationLabel = packageName,
+    ),
 )
 
 /** Builds a context only from the one app-owned storage layout; callers cannot supply host paths. */
@@ -105,6 +128,18 @@ object GuestRuntimeContextFactory {
         }
         require(packagePattern.matches(request.packageName)) { "Invalid Android package name" }
         require(sha256Pattern.matches(request.apkSha256)) { "Invalid APK SHA-256" }
+        val packageMetadata = request.packageMetadata
+        require(packageMetadata.packageName == request.packageName) { "Guest package metadata identity mismatch" }
+        require(packageMetadata.applicationLabel.isNotBlank()
+            && packageMetadata.applicationLabel.length <= 255
+            && '\u0000' !in packageMetadata.applicationLabel) { "Invalid guest application label" }
+        val versionName = packageMetadata.versionName
+        require(versionName == null || (versionName.length <= 255 && '\u0000' !in versionName)) {
+            "Invalid guest version name"
+        }
+        require(packageMetadata.versionCode >= 0) { "Invalid guest version code" }
+        require(packageMetadata.minSdk == null || packageMetadata.minSdk >= 1) { "Invalid guest minSdk" }
+        require(packageMetadata.targetSdk == null || packageMetadata.targetSdk >= 1) { "Invalid guest targetSdk" }
         require(request.guestAbis.size <= knownAbis.size && request.guestAbis.distinct().size == request.guestAbis.size) {
             "Invalid guest ABI list"
         }
@@ -145,6 +180,7 @@ object GuestRuntimeContextFactory {
             packageName = request.packageName,
             apkSha256 = request.apkSha256.lowercase(),
             guestAbis = request.guestAbis.toList(),
+            packageMetadata = request.packageMetadata,
             appRoot = appRoot,
             apkPath = apkPath,
             internalRoot = internalRoot,

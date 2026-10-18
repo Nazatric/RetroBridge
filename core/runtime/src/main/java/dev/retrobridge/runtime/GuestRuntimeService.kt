@@ -77,9 +77,15 @@ class GuestRuntimeService : Service() {
         val packageName = data.getString(GuestRuntimeProtocol.KEY_PACKAGE_NAME).orEmpty()
         val apkSha256 = data.getString(GuestRuntimeProtocol.KEY_APK_SHA256).orEmpty()
         val abis = data.getStringArray(GuestRuntimeProtocol.KEY_GUEST_ABIS).orEmpty()
+        val applicationLabel = data.getString(GuestRuntimeProtocol.KEY_APPLICATION_LABEL).orEmpty()
+        val versionName = data.getString(GuestRuntimeProtocol.KEY_VERSION_NAME)
+        val versionCode = data.getLong(GuestRuntimeProtocol.KEY_VERSION_CODE, 0L)
+        val minSdk = data.getInt(GuestRuntimeProtocol.KEY_MIN_SDK, 0).takeIf { it > 0 }
+        val targetSdk = data.getInt(GuestRuntimeProtocol.KEY_TARGET_SDK, 0).takeIf { it > 0 }
         if (guestId.length > MAX_GUEST_ID_LENGTH || packageName.length > MAX_PACKAGE_NAME_LENGTH ||
             apkSha256.length > MAX_SHA256_LENGTH || abis.size > MAX_ABIS_PER_GUEST ||
-            abis.any { it.length > MAX_ABI_NAME_LENGTH }
+            abis.any { it.length > MAX_ABI_NAME_LENGTH } || applicationLabel.length > MAX_PACKAGE_LABEL_LENGTH ||
+            (versionName?.length ?: 0) > MAX_PACKAGE_LABEL_LENGTH
         ) {
             throw IllegalArgumentException("Runtime context request exceeds an IPC field limit")
         }
@@ -89,6 +95,14 @@ class GuestRuntimeService : Service() {
                 packageName = packageName,
                 apkSha256 = apkSha256,
                 guestAbis = abis.toList(),
+                packageMetadata = GuestPackageMetadata(
+                    packageName = packageName,
+                    applicationLabel = applicationLabel,
+                    versionName = versionName,
+                    versionCode = versionCode,
+                    minSdk = minSdk,
+                    targetSdk = targetSdk,
+                ),
             ),
         )
         putResult(response, result)
@@ -129,6 +143,7 @@ class GuestRuntimeService : Service() {
         private const val MAX_REQUEST_ID_LENGTH = 64
         private const val MAX_GUEST_ID_LENGTH = 36
         private const val MAX_PACKAGE_NAME_LENGTH = 255
+        private const val MAX_PACKAGE_LABEL_LENGTH = 255
         private const val MAX_SHA256_LENGTH = 64
         private const val MAX_ABI_NAME_LENGTH = 32
         private const val MAX_ABIS_PER_GUEST = 6
