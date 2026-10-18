@@ -530,6 +530,75 @@ void write_vfp_double(GuestCpuState32& state, unsigned index, std::uint64_t valu
         return {};
     }
 
+    if ((instruction & 0x0e000090U) == 0x00000090U) {
+        const bool pre_index = (instruction & (1U << 24U)) != 0;
+        const bool add_offset = (instruction & (1U << 23U)) != 0;
+        const bool immediate_offset = (instruction & (1U << 22U)) != 0;
+        const bool encoded_writeback = (instruction & (1U << 21U)) != 0;
+        const bool writeback = encoded_writeback || !pre_index;
+        const bool load = (instruction & (1U << 20U)) != 0;
+        const auto rn = (instruction >> 16U) & 0xfU;
+        const auto rd = (instruction >> 12U) & 0xfU;
+        const auto operation = (instruction >> 5U) & 3U;
+        if (!pre_index && encoded_writeback) return fault("A32 unprivileged halfword transfer is unsupported");
+        unsigned transfer_size = 2;
+        bool signed_load = false;
+        if (operation == 0U || (operation != 1U && !load)) {
+            return fault("unsupported A32 doubleword or swap transfer encoding");
+        }
+        if (operation == 2U) {
+            transfer_size = 1;
+            signed_load = true;
+        } else if (operation == 3U) {
+            signed_load = true;
+        }
+        if (rn == 15U || rd == 15U || (!load && operation != 1U)) {
+            return fault("A32 halfword/signed transfer uses an unsupported PC or store encoding");
+        }
+        if (writeback && rn == rd) return fault("A32 halfword transfer writeback uses the same base and destination register");
+
+        std::uint32_t offset = 0;
+        if (immediate_offset) {
+            offset = ((instruction >> 4U) & 0xf0U) | (instruction & 0xfU);
+        } else {
+            if (((instruction >> 8U) & 0xfU) != 0) return fault("invalid A32 register-offset halfword transfer encoding");
+            const auto rm = instruction & 0xfU;
+            if (rm == 15U) return fault("A32 register-offset halfword transfer using PC is unpredictable");
+            offset = state.r[rm];
+        }
+
+        const auto base = state.r[rn];
+        std::uint64_t adjusted = base;
+        if (add_offset) {
+            adjusted += offset;
+        } else {
+            if (offset > base) return fault("A32 halfword transfer address wraps the guest address space");
+            adjusted -= offset;
+        }
+        if (adjusted > std::numeric_limits<std::uint32_t>::max()) {
+            return fault("A32 halfword transfer address wraps the guest address space");
+        }
+        const auto address = static_cast<std::uint32_t>(pre_index ? adjusted : base);
+        const auto address_end = static_cast<std::uint64_t>(address) + transfer_size;
+        if (address_end > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) + 1U) {
+            return fault("A32 halfword transfer access wraps the guest address space");
+        }
+        if (transfer_size == 2U && (address & 1U) != 0) {
+            return fault("A32 halfword transfer address is not halfword-aligned");
+        }
+        if (load) {
+            std::uint32_t value = 0;
+            if (!read_guest_value(memory, address, transfer_size, value, signed_load)) {
+                return fault("A32 halfword/signed load accessed unreadable guest memory");
+            }
+            state.r[rd] = value;
+        } else if (!write_guest_value(memory, address, transfer_size, state.r[rd])) {
+            return fault("A32 halfword store accessed read-only guest memory");
+        }
+        if (writeback) state.r[rn] = static_cast<std::uint32_t>(adjusted);
+        return {};
+    }
+
     if ((instruction & 0x0c000000U) == 0x00000000U) {
         const bool immediate = (instruction & (1U << 25U)) != 0;
         const auto opcode = (instruction >> 21U) & 0xfU;
