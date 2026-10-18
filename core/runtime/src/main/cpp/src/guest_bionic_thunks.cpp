@@ -1,7 +1,7 @@
 #include "retrobridge/guest_bionic_thunks.h"
+#include "retrobridge/arm32_stat_layout.h"
 
 #include <algorithm>
-#include <array>
 #include <bit>
 #include <cerrno>
 #include <cmath>
@@ -45,36 +45,6 @@ constexpr int kAtRemoveDir = 0x200;
     if (left.size() == right.size()) return 0;
     return left.size() < right.size() ? -static_cast<int>(static_cast<unsigned char>(right[count]))
                                       : static_cast<int>(static_cast<unsigned char>(left[count]));
-}
-
-void put_guest_le(std::span<std::byte> output, std::size_t offset, std::uint64_t value, std::size_t count) noexcept {
-    for (std::size_t index = 0; index < count; ++index) {
-        output[offset + index] = static_cast<std::byte>((value >> (index * 8U)) & 0xffU);
-    }
-}
-
-[[nodiscard]] bool write_guest_stat64(GuestMemory& memory, std::uint32_t address, const struct stat& status) noexcept {
-    constexpr std::size_t kGuestStat64Size = 96;
-    if (!memory.is_accessible(GuestAddress32{address}, kGuestStat64Size, GuestPermission::Write)) return false;
-    std::array<std::byte, kGuestStat64Size> bytes{};
-    put_guest_le(bytes, 0, static_cast<std::uint64_t>(status.st_dev), 8);
-    put_guest_le(bytes, 12, static_cast<std::uint32_t>(status.st_ino), 4);
-    put_guest_le(bytes, 16, static_cast<std::uint32_t>(status.st_mode), 4);
-    put_guest_le(bytes, 20, static_cast<std::uint32_t>(status.st_nlink), 4);
-    put_guest_le(bytes, 24, static_cast<std::uint32_t>(status.st_uid), 4);
-    put_guest_le(bytes, 28, static_cast<std::uint32_t>(status.st_gid), 4);
-    put_guest_le(bytes, 32, static_cast<std::uint64_t>(status.st_rdev), 8);
-    put_guest_le(bytes, 44, static_cast<std::uint64_t>(status.st_size), 8);
-    put_guest_le(bytes, 52, static_cast<std::uint32_t>(status.st_blksize), 4);
-    put_guest_le(bytes, 56, static_cast<std::uint64_t>(status.st_blocks), 8);
-    put_guest_le(bytes, 64, static_cast<std::uint32_t>(status.st_atim.tv_sec), 4);
-    put_guest_le(bytes, 68, static_cast<std::uint32_t>(status.st_atim.tv_nsec), 4);
-    put_guest_le(bytes, 72, static_cast<std::uint32_t>(status.st_mtim.tv_sec), 4);
-    put_guest_le(bytes, 76, static_cast<std::uint32_t>(status.st_mtim.tv_nsec), 4);
-    put_guest_le(bytes, 80, static_cast<std::uint32_t>(status.st_ctim.tv_sec), 4);
-    put_guest_le(bytes, 84, static_cast<std::uint32_t>(status.st_ctim.tv_nsec), 4);
-    put_guest_le(bytes, 88, static_cast<std::uint64_t>(status.st_ino), 8);
-    return memory.write(GuestAddress32{address}, bytes);
 }
 
 }  // namespace
@@ -217,6 +187,9 @@ bool GuestBionicThunks::install(std::string* diagnostic) {
             || !bind("write", [this](GuestCpuState32& state, GuestMemory&) { return file_write(state); })
             || !bind("lseek", [this](GuestCpuState32& state, GuestMemory&) { return file_seek(state); })
             || !bind("lseek64", [this](GuestCpuState32& state, GuestMemory&) { return file_seek64(state); })
+            || !bind("stat64", [this](GuestCpuState32& state, GuestMemory&) { return file_stat64(state, false); })
+            || !bind("lstat64", [this](GuestCpuState32& state, GuestMemory&) { return file_stat64(state, true); })
+            || !bind("fstat64", [this](GuestCpuState32& state, GuestMemory&) { return file_fstat64(state); })
             || !bind("mkdir", [this](GuestCpuState32& state, GuestMemory&) {
                 const auto path = read_c_string(state.r[0]);
                 if (vfs_ == nullptr) {
@@ -1103,6 +1076,54 @@ GuestHookResult GuestBionicThunks::file_seek64(GuestCpuState32& state) {
     return {};
 }
 
+GuestHookResult GuestBionicThunks::file_stat64(GuestCpuState32& state, bool no_follow) {
+    if (vfs_ == nullptr) {
+        set_errno(ENOSYS);
+        state.r[0] = as_u32(-1);
+        return {};
+    }
+    const auto path = read_c_string(state.r[0]);
+    if (!path.has_value()) {
+        set_errno(EFAULT);
+        state.r[0] = as_u32(-1);
+        return {};
+    }
+    struct stat status{};
+    if (vfs_->stat_path(*path, &status, no_follow) != 0) {
+        set_errno(errno);
+        state.r[0] = as_u32(-1);
+        return {};
+    }
+    if (!write_arm32_guest_stat64(memory_, GuestAddress32{state.r[1]}, status)) {
+        set_errno(EFAULT);
+        state.r[0] = as_u32(-1);
+        return {};
+    }
+    state.r[0] = 0;
+    return {};
+}
+
+GuestHookResult GuestBionicThunks::file_fstat64(GuestCpuState32& state) {
+    if (vfs_ == nullptr) {
+        set_errno(ENOSYS);
+        state.r[0] = as_u32(-1);
+        return {};
+    }
+    struct stat status{};
+    if (vfs_->fstat(as_i32(state.r[0]), &status) != 0) {
+        set_errno(errno);
+        state.r[0] = as_u32(-1);
+        return {};
+    }
+    if (!write_arm32_guest_stat64(memory_, GuestAddress32{state.r[1]}, status)) {
+        set_errno(EFAULT);
+        state.r[0] = as_u32(-1);
+        return {};
+    }
+    state.r[0] = 0;
+    return {};
+}
+
 GuestHookResult GuestBionicThunks::file_statat64(GuestCpuState32& state) {
     if (vfs_ == nullptr) {
         set_errno(ENOSYS);
@@ -1121,7 +1142,7 @@ GuestHookResult GuestBionicThunks::file_statat64(GuestCpuState32& state) {
         state.r[0] = as_u32(-1);
         return {};
     }
-    if (!write_guest_stat64(memory_, state.r[2], status)) {
+    if (!write_arm32_guest_stat64(memory_, GuestAddress32{state.r[2]}, status)) {
         set_errno(EFAULT);
         state.r[0] = as_u32(-1);
         return {};

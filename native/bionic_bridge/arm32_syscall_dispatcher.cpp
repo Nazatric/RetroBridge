@@ -1,4 +1,5 @@
 #include "arm32_syscall_dispatcher.h"
+#include "retrobridge/arm32_stat_layout.h"
 
 #include <algorithm>
 #include <array>
@@ -283,27 +284,7 @@ std::int32_t Arm32SyscallDispatcher::fstat_call(int fd, std::uint32_t output) {
 }
 
 std::int32_t Arm32SyscallDispatcher::write_stat64(const struct stat& status, std::uint32_t output) {
-    std::array<std::byte, 96> bytes{};
-    put_le(bytes, 0, static_cast<std::uint64_t>(status.st_dev), 8);
-    put_le(bytes, 8, 0, 4);
-    put_le(bytes, 12, static_cast<std::uint32_t>(status.st_ino), 4);
-    put_le(bytes, 16, static_cast<std::uint32_t>(status.st_mode), 4);
-    put_le(bytes, 20, static_cast<std::uint32_t>(status.st_nlink), 4);
-    put_le(bytes, 24, static_cast<std::uint32_t>(status.st_uid), 4);
-    put_le(bytes, 28, static_cast<std::uint32_t>(status.st_gid), 4);
-    put_le(bytes, 32, static_cast<std::uint64_t>(status.st_rdev), 8);
-    put_le(bytes, 40, 0, 4);
-    put_le(bytes, 44, static_cast<std::uint64_t>(status.st_size), 8);
-    put_le(bytes, 52, static_cast<std::uint32_t>(status.st_blksize), 4);
-    put_le(bytes, 56, static_cast<std::uint64_t>(status.st_blocks), 8);
-    put_le(bytes, 64, static_cast<std::uint32_t>(status.st_atim.tv_sec), 4);
-    put_le(bytes, 68, static_cast<std::uint32_t>(status.st_atim.tv_nsec), 4);
-    put_le(bytes, 72, static_cast<std::uint32_t>(status.st_mtim.tv_sec), 4);
-    put_le(bytes, 76, static_cast<std::uint32_t>(status.st_mtim.tv_nsec), 4);
-    put_le(bytes, 80, static_cast<std::uint32_t>(status.st_ctim.tv_sec), 4);
-    put_le(bytes, 84, static_cast<std::uint32_t>(status.st_ctim.tv_nsec), 4);
-    put_le(bytes, 88, static_cast<std::uint64_t>(status.st_ino), 8);
-    return memory_.write(GuestAddress32{output}, bytes) ? 0 : -EFAULT;
+    return write_arm32_guest_stat64(memory_, GuestAddress32{output}, status) ? 0 : -EFAULT;
 }
 
 std::int32_t Arm32SyscallDispatcher::mmap2_call(GuestCpuState32& state) {

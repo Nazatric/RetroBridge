@@ -797,7 +797,8 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
                 && thunks.resolve_symbol("openat").has_value() && thunks.resolve_symbol("mkdirat").has_value()
                 && thunks.resolve_symbol("unlinkat").has_value() && thunks.resolve_symbol("renameat").has_value()
                 && thunks.resolve_symbol("faccessat").has_value() && thunks.resolve_symbol("fstatat64").has_value()
-                && thunks.resolve_symbol("__android_log_write").has_value(),
+                && thunks.resolve_symbol("stat64").has_value() && thunks.resolve_symbol("lstat64").has_value()
+                && thunks.resolve_symbol("fstat64").has_value() && thunks.resolve_symbol("__android_log_write").has_value(),
             "Bionic symbol resolver exposes allocator, pthread, libm, file/directory, and logging subsets");
         check(thunks.resolve_guest_symbol("__stack_chk_guard").value_or(0U) == thunks.stack_guard_cell().value()
                 && thunks.resolve_data_symbol("errno").value_or(GuestAddress32{0}) == thunks.errno_cell(),
@@ -1061,6 +1062,30 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
             auto [write_state, write_result] = invoke("write", state);
             check(write_result.status == ExecutionStatus::Completed && write_state.r[0] == file_bytes.size(),
                 "guest libc write persists bytes through the VFS");
+
+            constexpr auto guest_stat_address = kGuestData + 0xa80U;
+            state = {};
+            state.r[0] = kGuestData + 0x400U;
+            state.r[1] = guest_stat_address;
+            auto [stat_state, stat_result] = invoke("stat64", state);
+            check(stat_result.status == ExecutionStatus::Completed && stat_state.r[0] == 0
+                    && (memory.read_u32(GuestAddress32{guest_stat_address + 16U}).value_or(0U) & S_IFMT) == S_IFREG
+                    && memory.read_u32(GuestAddress32{guest_stat_address + 44U}).value_or(0U) == file_bytes.size(),
+                "Bionic stat64 marshals regular-file metadata into the guest ARM32 layout");
+            constexpr auto guest_lstat_address = kGuestData + 0xb00U;
+            state.r[1] = guest_lstat_address;
+            auto [lstat_state, lstat_result] = invoke("lstat64", state);
+            check(lstat_result.status == ExecutionStatus::Completed && lstat_state.r[0] == 0
+                    && (memory.read_u32(GuestAddress32{guest_lstat_address + 16U}).value_or(0U) & S_IFMT) == S_IFREG,
+                "Bionic lstat64 uses no-follow path metadata lookup");
+            constexpr auto guest_fstat_address = kGuestData + 0xb80U;
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(guest_fd);
+            state.r[1] = guest_fstat_address;
+            auto [fstat_state, fstat_result] = invoke("fstat64", state);
+            check(fstat_result.status == ExecutionStatus::Completed && fstat_state.r[0] == 0
+                    && memory.read_u32(GuestAddress32{guest_fstat_address + 44U}).value_or(0U) == file_bytes.size(),
+                "Bionic fstat64 reads descriptor metadata through the guest VFS");
 
             state = {};
             state.r[0] = static_cast<std::uint32_t>(guest_fd);
