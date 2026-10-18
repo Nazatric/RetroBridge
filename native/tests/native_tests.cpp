@@ -792,8 +792,10 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
         if (!diagnostic.empty()) std::cerr << "Bionic thunk diagnostic: " << diagnostic << '\n';
         check(thunks.installed(), "Bionic thunk table records its initialized state");
         check(thunks.resolve_symbol("malloc").has_value() && thunks.resolve_symbol("pthread_mutex_lock").has_value()
-                && thunks.resolve_symbol("sqrtf").has_value(),
-            "Bionic symbol resolver exposes allocator, pthread, and libm functions");
+                && thunks.resolve_symbol("sqrtf").has_value() && thunks.resolve_symbol("mkdir").has_value()
+                && thunks.resolve_symbol("rename").has_value() && thunks.resolve_symbol("getdents64").has_value()
+                && thunks.resolve_symbol("__android_log_write").has_value(),
+            "Bionic symbol resolver exposes allocator, pthread, libm, file/directory, and logging subsets");
         check(thunks.resolve_guest_symbol("__stack_chk_guard").value_or(0U) == thunks.stack_guard_cell().value()
                 && thunks.resolve_data_symbol("errno").value_or(GuestAddress32{0}) == thunks.errno_cell(),
             "guest symbol resolver returns data-cell addresses for stack guard and errno");
@@ -1094,6 +1096,97 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
             check(close_result.status == ExecutionStatus::Completed && close_state.r[0] == 0,
                 "guest libc close releases its virtual descriptor");
         }
+        check(write_guest_string(kGuestData + 0x780U, "/data/user/0/org.retrobridge.native/files"),
+            "guest directory path is staged");
+        state = {};
+        state.r[0] = kGuestData + 0x780U;
+        state.r[1] = static_cast<std::uint32_t>(O_RDONLY | O_DIRECTORY);
+        auto [directory_open_state, directory_open_result] = invoke("open", state);
+        const auto directory_fd = std::bit_cast<std::int32_t>(directory_open_state.r[0]);
+        check(directory_open_result.status == ExecutionStatus::Completed && directory_fd >= 3,
+            "Bionic open returns a virtual descriptor for an app-private directory");
+        if (directory_fd >= 3) {
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(directory_fd);
+            state.r[1] = kGuestData + 0x1000U;
+            state.r[2] = 1024U;
+            auto [getdents_state, getdents_result] = invoke("getdents64", state);
+            const auto returned_bytes = std::min<std::uint32_t>(getdents_state.r[0], 1024U);
+            std::array<std::byte, 10> guest_file_name{
+                std::byte{'g'}, std::byte{'u'}, std::byte{'e'}, std::byte{'s'}, std::byte{'t'},
+                std::byte{'.'}, std::byte{'b'}, std::byte{'i'}, std::byte{'n'}, std::byte{0},
+            };
+            std::array<std::byte, 1024> directory_bytes{};
+            check(getdents_result.status == ExecutionStatus::Completed && returned_bytes > 0
+                    && memory.read(GuestAddress32{kGuestData + 0x1000U}, directory_bytes)
+                    && std::search(directory_bytes.begin(), directory_bytes.begin() + returned_bytes,
+                        guest_file_name.begin(), guest_file_name.end())
+                        != directory_bytes.begin() + returned_bytes,
+                "Bionic getdents64 copies bounded Linux dirent64 records into guest memory");
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(directory_fd);
+            auto [directory_close_state, directory_close_result] = invoke("close", state);
+            check(directory_close_result.status == ExecutionStatus::Completed && directory_close_state.r[0] == 0,
+                "Bionic close releases a guest directory stream");
+        }
+
+        check(write_guest_string(kGuestData + 0x780U, "/data/user/0/org.retrobridge.native/files/guest.bin")
+                && write_guest_string(kGuestData + 0x820U, "/data/user/0/org.retrobridge.native/files/renamed.bin"),
+            "guest rename source and destination paths are staged");
+        state = {};
+        state.r[0] = kGuestData + 0x780U;
+        state.r[1] = kGuestData + 0x820U;
+        auto [rename_state, rename_result] = invoke("rename", state);
+        check(rename_result.status == ExecutionStatus::Completed && rename_state.r[0] == 0,
+            "Bionic rename moves a file only within the app-private VFS");
+        state = {};
+        state.r[0] = kGuestData + 0x820U;
+        state.r[1] = F_OK;
+        auto [renamed_access_state, renamed_access_result] = invoke("access", state);
+        check(renamed_access_result.status == ExecutionStatus::Completed && renamed_access_state.r[0] == 0,
+            "Bionic access finds a renamed guest file");
+        state = {};
+        state.r[0] = kGuestData + 0x820U;
+        auto [unlink_state, unlink_result] = invoke("unlink", state);
+        state = {};
+        state.r[0] = kGuestData + 0x820U;
+        state.r[1] = F_OK;
+        auto [removed_access_state, removed_access_result] = invoke("access", state);
+        check(unlink_result.status == ExecutionStatus::Completed && unlink_state.r[0] == 0
+                && removed_access_result.status == ExecutionStatus::Completed
+                && std::bit_cast<std::int32_t>(removed_access_state.r[0]) == -1
+                && memory.read_u32(thunks.errno_cell()).value_or(0U) == ENOENT,
+            "Bionic unlink removes a guest file and access reports its real ENOENT status");
+
+        check(write_guest_string(kGuestData + 0x880U, "/data/user/0/org.retrobridge.native/files/cache-dir"),
+            "guest directory mutation path is staged");
+        state = {};
+        state.r[0] = kGuestData + 0x880U;
+        state.r[1] = 0700U;
+        auto [mkdir_state, mkdir_result] = invoke("mkdir", state);
+        state = {};
+        state.r[0] = kGuestData + 0x880U;
+        state.r[1] = F_OK;
+        auto [directory_access_state, directory_access_result] = invoke("access", state);
+        state = {};
+        state.r[0] = kGuestData + 0x880U;
+        auto [rmdir_state, rmdir_result] = invoke("rmdir", state);
+        check(mkdir_result.status == ExecutionStatus::Completed && mkdir_state.r[0] == 0
+                && directory_access_result.status == ExecutionStatus::Completed && directory_access_state.r[0] == 0
+                && rmdir_result.status == ExecutionStatus::Completed && rmdir_state.r[0] == 0,
+            "Bionic mkdir/access/rmdir operate on app-private directories");
+
+        check(write_guest_string(kGuestData + 0x900U, "RetroBridge")
+                && write_guest_string(kGuestData + 0x920U, "Bionic log thunk executed"),
+            "guest Android log tag and message are staged");
+        state = {};
+        state.r[0] = 4U;
+        state.r[1] = kGuestData + 0x900U;
+        state.r[2] = kGuestData + 0x920U;
+        auto [log_state, log_result] = invoke("__android_log_write", state);
+        check(log_result.status == ExecutionStatus::Completed && log_state.r[0] == 0,
+            "Android log write validates guest strings and emits the requested priority/tag/message");
+
         check(write_guest_string(kGuestData + 0x700U, "/data/user/0/org.retrobridge.native/files/../../escape"),
             "unsafe guest path fixture is staged");
         state = {};

@@ -21,6 +21,8 @@ constexpr std::uint32_t kPthreadInvalid = 22U;
 constexpr std::uint32_t kPthreadBusy = 16U;
 constexpr std::uint32_t kPthreadDeadlock = 35U;
 constexpr std::uint32_t kPthreadAgain = 11U;
+constexpr int kAtFdcwd = -100;
+constexpr int kAtRemoveDir = 0x200;
 
 [[nodiscard]] std::uint32_t as_u32(std::int32_t value) noexcept {
     return std::bit_cast<std::uint32_t>(value);
@@ -182,6 +184,84 @@ bool GuestBionicThunks::install(std::string* diagnostic) {
             || !bind("write", [this](GuestCpuState32& state, GuestMemory&) { return file_write(state); })
             || !bind("lseek", [this](GuestCpuState32& state, GuestMemory&) { return file_seek(state); })
             || !bind("lseek64", [this](GuestCpuState32& state, GuestMemory&) { return file_seek64(state); })
+            || !bind("mkdir", [this](GuestCpuState32& state, GuestMemory&) {
+                const auto path = read_c_string(state.r[0]);
+                if (vfs_ == nullptr) {
+                    set_errno(ENOSYS);
+                    state.r[0] = as_u32(-1);
+                } else if (!path.has_value()) {
+                    set_errno(EFAULT);
+                    state.r[0] = as_u32(-1);
+                } else {
+                    const auto result = vfs_->mkdirat(kAtFdcwd, *path, state.r[1]);
+                    if (result != 0) set_errno(errno);
+                    state.r[0] = as_u32(result);
+                }
+                return GuestHookResult{};
+            })
+            || !bind("unlink", [this](GuestCpuState32& state, GuestMemory&) {
+                const auto path = read_c_string(state.r[0]);
+                if (vfs_ == nullptr) {
+                    set_errno(ENOSYS);
+                    state.r[0] = as_u32(-1);
+                } else if (!path.has_value()) {
+                    set_errno(EFAULT);
+                    state.r[0] = as_u32(-1);
+                } else {
+                    const auto result = vfs_->unlinkat(kAtFdcwd, *path, 0);
+                    if (result != 0) set_errno(errno);
+                    state.r[0] = as_u32(result);
+                }
+                return GuestHookResult{};
+            })
+            || !bind("rmdir", [this](GuestCpuState32& state, GuestMemory&) {
+                const auto path = read_c_string(state.r[0]);
+                if (vfs_ == nullptr) {
+                    set_errno(ENOSYS);
+                    state.r[0] = as_u32(-1);
+                } else if (!path.has_value()) {
+                    set_errno(EFAULT);
+                    state.r[0] = as_u32(-1);
+                } else {
+                    const auto result = vfs_->unlinkat(kAtFdcwd, *path, kAtRemoveDir);
+                    if (result != 0) set_errno(errno);
+                    state.r[0] = as_u32(result);
+                }
+                return GuestHookResult{};
+            })
+            || !bind("access", [this](GuestCpuState32& state, GuestMemory&) {
+                const auto path = read_c_string(state.r[0]);
+                if (vfs_ == nullptr) {
+                    set_errno(ENOSYS);
+                    state.r[0] = as_u32(-1);
+                } else if (!path.has_value()) {
+                    set_errno(EFAULT);
+                    state.r[0] = as_u32(-1);
+                } else {
+                    const auto result = vfs_->access(*path, as_i32(state.r[1]));
+                    if (result != 0) set_errno(errno);
+                    state.r[0] = as_u32(result);
+                }
+                return GuestHookResult{};
+            })
+            || !bind("rename", [this](GuestCpuState32& state, GuestMemory&) {
+                const auto old_path = read_c_string(state.r[0]);
+                const auto new_path = read_c_string(state.r[1]);
+                if (vfs_ == nullptr) {
+                    set_errno(ENOSYS);
+                    state.r[0] = as_u32(-1);
+                } else if (!old_path.has_value() || !new_path.has_value()) {
+                    set_errno(EFAULT);
+                    state.r[0] = as_u32(-1);
+                } else {
+                    const auto result = vfs_->renameat(kAtFdcwd, *old_path, kAtFdcwd, *new_path);
+                    if (result != 0) set_errno(errno);
+                    state.r[0] = as_u32(result);
+                }
+                return GuestHookResult{};
+            })
+            || !bind("getdents64", [this](GuestCpuState32& state, GuestMemory&) { return file_getdents64(state); })
+            || !bind("__getdents64", [this](GuestCpuState32& state, GuestMemory&) { return file_getdents64(state); })
             || !bind("pthread_mutex_init", [this](GuestCpuState32& state, GuestMemory&) {
                 const auto address = state.r[0];
                 if (!memory_.is_accessible(GuestAddress32{address}, 4, GuestPermission::Write)) {
@@ -907,6 +987,34 @@ GuestHookResult GuestBionicThunks::file_seek64(GuestCpuState32& state) {
         const auto bits = static_cast<std::uint64_t>(result);
         state.r[0] = static_cast<std::uint32_t>(bits);
         state.r[1] = static_cast<std::uint32_t>(bits >> 32U);
+    }
+    return {};
+}
+
+GuestHookResult GuestBionicThunks::file_getdents64(GuestCpuState32& state) {
+    const auto count = static_cast<std::size_t>(state.r[2]);
+    if (vfs_ == nullptr) {
+        set_errno(ENOSYS);
+        state.r[0] = as_u32(-1);
+        return {};
+    }
+    if (count > kMaxMemoryOperation
+        || !memory_.is_accessible(GuestAddress32{state.r[1]}, count, GuestPermission::Write)) {
+        set_errno(count > kMaxMemoryOperation ? EINVAL : EFAULT);
+        state.r[0] = as_u32(-1);
+        return {};
+    }
+    std::vector<std::byte> entries(count);
+    const auto result = vfs_->getdents64(as_i32(state.r[0]), entries);
+    if (result < 0) {
+        set_errno(errno);
+        state.r[0] = as_u32(-1);
+    } else if (result > 0 && !memory_.write(GuestAddress32{state.r[1]},
+            std::span<const std::byte>{entries.data(), static_cast<std::size_t>(result)})) {
+        set_errno(EFAULT);
+        state.r[0] = as_u32(-1);
+    } else {
+        state.r[0] = static_cast<std::uint32_t>(result);
     }
     return {};
 }
