@@ -409,6 +409,38 @@ void write_vfp_double(GuestCpuState32& state, unsigned index, std::uint64_t valu
         return {};
     }
 
+    if ((instruction & 0x0f8000f0U) == 0x00800090U) {
+        const bool signed_multiply = (instruction & (1U << 22U)) != 0;
+        const bool accumulate = (instruction & (1U << 21U)) != 0;
+        const bool set_flags = (instruction & (1U << 20U)) != 0;
+        const auto rd_hi = (instruction >> 16U) & 0xfU;
+        const auto rd_lo = (instruction >> 12U) & 0xfU;
+        const auto rs = (instruction >> 8U) & 0xfU;
+        const auto rm = instruction & 0xfU;
+        if (rd_hi == 15U || rd_lo == 15U || rd_hi == rd_lo || rs == 15U || rm == 15U) {
+            return fault("A32 long multiply uses an invalid PC or overlapping destination register");
+        }
+        std::uint64_t product = 0;
+        if (signed_multiply) {
+            const auto left = static_cast<std::int64_t>(std::bit_cast<std::int32_t>(state.r[rm]));
+            const auto right = static_cast<std::int64_t>(std::bit_cast<std::int32_t>(state.r[rs]));
+            product = static_cast<std::uint64_t>(left * right);
+        } else {
+            product = static_cast<std::uint64_t>(state.r[rm]) * state.r[rs];
+        }
+        if (accumulate) {
+            const auto accumulator = (static_cast<std::uint64_t>(state.r[rd_hi]) << 32U) | state.r[rd_lo];
+            product += accumulator;
+        }
+        state.r[rd_lo] = static_cast<std::uint32_t>(product);
+        state.r[rd_hi] = static_cast<std::uint32_t>(product >> 32U);
+        if (set_flags) {
+            set_flag(state.cpsr, kCpsrN, (product >> 63U) != 0);
+            set_flag(state.cpsr, kCpsrZ, product == 0);
+        }
+        return {};
+    }
+
     if ((instruction & 0x0fc000f0U) == 0x00000090U) {
         const auto rd = (instruction >> 16U) & 0xfU;
         const auto rn = (instruction >> 12U) & 0xfU;

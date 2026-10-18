@@ -2882,6 +2882,33 @@ void test_a32_t32_execution_svc_and_trampolines() {
             && memory.read_u32(GuestAddress32{0xc00cU}).value_or(0U) == 0x55667788U,
         "A32 STRD/LDRD transfer register pairs in order and apply immediate address writeback");
 
+    std::vector<std::byte> arm_long_multiply_program(24, std::byte{0});
+    put_u32(arm_long_multiply_program, 0, 0xe0c32190U); // smull r2, r3, r0, r1
+    put_u32(arm_long_multiply_program, 4, 0xe0854190U); // umull r4, r5, r0, r1
+    put_u32(arm_long_multiply_program, 8, 0xe0f98190U); // smlals r8, r9, r0, r1
+    put_u32(arm_long_multiply_program, 12, 0xe0aba190U); // umlal r10, r11, r0, r1
+    put_u32(arm_long_multiply_program, 16, 0xe3a07001U); // mov r7, #1
+    put_u32(arm_long_multiply_program, 20, 0xef000000U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x5300U}, arm_long_multiply_program,
+            arm_long_multiply_program.size(), GuestPermission::Read | GuestPermission::Execute),
+        "A32 long-multiply test code maps RX");
+    GuestCpuState32 arm_long_multiply_state{};
+    arm_long_multiply_state.r[0] = 0xfffffff9U; // -7 signed, 4294967289 unsigned
+    arm_long_multiply_state.r[1] = 9U;
+    arm_long_multiply_state.r[8] = 100U;
+    arm_long_multiply_state.r[10] = 5U;
+    arm_long_multiply_state.r[11] = 1U;
+    arm_long_multiply_state.cpsr |= 0x30000000U; // preserve C and V across SMLALS
+    const auto arm_long_multiply_result = interpreter.run(
+        arm_long_multiply_state, GuestAddress32{0x5300U}, 32);
+    check(arm_long_multiply_result.status == ExecutionStatus::Completed
+            && arm_long_multiply_state.r[2] == 0xffffffc1U && arm_long_multiply_state.r[3] == 0xffffffffU
+            && arm_long_multiply_state.r[4] == 0xffffffc1U && arm_long_multiply_state.r[5] == 8U
+            && arm_long_multiply_state.r[8] == 37U && arm_long_multiply_state.r[9] == 0U
+            && arm_long_multiply_state.r[10] == 0xffffffc6U && arm_long_multiply_state.r[11] == 9U
+            && (arm_long_multiply_state.cpsr & 0xf0000000U) == 0x30000000U,
+        "A32 SMULL/UMULL/SMLAL/UMLAL compute full 64-bit results and preserve unaffected flags");
+
     std::vector<std::byte> thumb_program(8, std::byte{0});
     put_u16(thumb_program, 0, 0x2007U); // movs r0, #7
     put_u16(thumb_program, 2, 0x3001U); // adds r0, #1
