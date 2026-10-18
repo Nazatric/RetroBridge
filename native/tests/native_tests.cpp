@@ -2727,9 +2727,9 @@ void test_a32_t32_execution_svc_and_trampolines() {
             && arm_multiple_state.r[13] == 0x9000U,
         "A32 STM/LDM transfer registers in order and apply stack-pointer writeback");
 
-    check(memory.map_zeroed(GuestAddress32{0xa000U}, 0x100U,
+    check(memory.map_zeroed(GuestAddress32{0xb000U}, 0x100U,
             GuestPermission::Read | GuestPermission::Write)
-            && memory.write_u16(GuestAddress32{0xa00cU}, 0x5aa5U),
+            && memory.write_u16(GuestAddress32{0xb00cU}, 0x5aa5U),
         "A32 halfword-transfer data maps read/write and stages a register-offset value");
     std::vector<std::byte> arm_halfword_program(36, std::byte{0});
     put_u32(arm_halfword_program, 0, 0xe1e100b4U);  // strh r0, [r1, #4]!
@@ -2746,18 +2746,18 @@ void test_a32_t32_execution_svc_and_trampolines() {
         "A32 halfword-transfer test code maps RX");
     GuestCpuState32 arm_halfword_state{};
     arm_halfword_state.r[0] = 0x80ffU;
-    arm_halfword_state.r[1] = 0xa000U;
+    arm_halfword_state.r[1] = 0xb000U;
     arm_halfword_state.r[6] = 0x1234U;
     arm_halfword_state.r[8] = 8U;
     const auto arm_halfword_result = interpreter.run(arm_halfword_state, GuestAddress32{0x5100U}, 32);
     check(arm_halfword_result.status == ExecutionStatus::Completed
-            && arm_halfword_state.r[1] == 0xa008U
+            && arm_halfword_state.r[1] == 0xb008U
             && arm_halfword_state.r[2] == 0x000080ffU
             && arm_halfword_state.r[3] == 0xffffffffU
             && arm_halfword_state.r[4] == 0xffff80ffU
             && arm_halfword_state.r[5] == 0x000080ffU
             && arm_halfword_state.r[9] == 0x00005aa5U
-            && memory.read_u32(GuestAddress32{0xa006U}).value_or(0U) == 0x00001234U,
+            && memory.read_u32(GuestAddress32{0xb006U}).value_or(0U) == 0x00001234U,
         "A32 STRH/LDRH/LDRSB/LDRSH cover register/immediate offsets, sign extension, and pre/post-index writeback");
 
     std::vector<std::byte> thumb_program(8, std::byte{0});
