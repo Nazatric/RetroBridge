@@ -66,6 +66,7 @@ private:
     [[nodiscard]] GuestHookResult file_write(GuestCpuState32& state);
     [[nodiscard]] GuestHookResult file_seek(GuestCpuState32& state);
     [[nodiscard]] GuestHookResult file_seek64(GuestCpuState32& state);
+    [[nodiscard]] GuestHookResult file_statat64(GuestCpuState32& state);
     [[nodiscard]] GuestHookResult file_getdents64(GuestCpuState32& state);
     [[nodiscard]] static std::uint64_t read_u64(std::uint32_t low, std::uint32_t high) noexcept;
     static void write_double_result(GuestCpuState32& state, double value) noexcept;

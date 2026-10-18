@@ -796,7 +796,7 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
                 && thunks.resolve_symbol("rename").has_value() && thunks.resolve_symbol("getdents64").has_value()
                 && thunks.resolve_symbol("openat").has_value() && thunks.resolve_symbol("mkdirat").has_value()
                 && thunks.resolve_symbol("unlinkat").has_value() && thunks.resolve_symbol("renameat").has_value()
-                && thunks.resolve_symbol("faccessat").has_value()
+                && thunks.resolve_symbol("faccessat").has_value() && thunks.resolve_symbol("fstatat64").has_value()
                 && thunks.resolve_symbol("__android_log_write").has_value(),
             "Bionic symbol resolver exposes allocator, pthread, libm, file/directory, and logging subsets");
         check(thunks.resolve_guest_symbol("__stack_chk_guard").value_or(0U) == thunks.stack_guard_cell().value()
@@ -1208,6 +1208,16 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
             at_apis_passed = at_apis_passed && openat_file_result.status == ExecutionStatus::Completed
                 && openat_file_fd >= 3;
             if (openat_file_fd >= 3) {
+                const std::array<std::byte, 4> at_file_bytes{
+                    std::byte{'a'}, std::byte{'t'}, std::byte{'!'}, std::byte{'\n'}};
+                at_apis_passed = at_apis_passed && memory.write(GuestAddress32{kGuestData + 0x9e0U}, at_file_bytes);
+                state = {};
+                state.r[0] = static_cast<std::uint32_t>(openat_file_fd);
+                state.r[1] = kGuestData + 0x9e0U;
+                state.r[2] = static_cast<std::uint32_t>(at_file_bytes.size());
+                auto [write_at_file_state, write_at_file_result] = invoke("write", state);
+                at_apis_passed = at_apis_passed && write_at_file_result.status == ExecutionStatus::Completed
+                    && write_at_file_state.r[0] == at_file_bytes.size();
                 state = {};
                 state.r[0] = static_cast<std::uint32_t>(openat_file_fd);
                 auto [close_at_file_state, close_at_file_result] = invoke("close", state);
@@ -1221,6 +1231,22 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
             auto [faccessat_state, faccessat_result] = invoke("faccessat", state);
             at_apis_passed = at_apis_passed && faccessat_result.status == ExecutionStatus::Completed
                 && faccessat_state.r[0] == 0;
+            constexpr auto at_stat_address = kGuestData + 0xa00U;
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(openat_directory_fd);
+            state.r[1] = kGuestData + 0x980U;
+            state.r[2] = at_stat_address;
+            state.r[3] = 0U;
+            auto [fstatat_state, fstatat_result] = invoke("fstatat64", state);
+            at_apis_passed = at_apis_passed && fstatat_result.status == ExecutionStatus::Completed
+                && fstatat_state.r[0] == 0
+                && (memory.read_u32(GuestAddress32{at_stat_address + 16U}).value_or(0U) & S_IFMT) == S_IFREG
+                && memory.read_u32(GuestAddress32{at_stat_address + 44U}).value_or(0U) == 4U;
+            state.r[3] = 0x40000000U;
+            auto [bad_fstatat_state, bad_fstatat_result] = invoke("fstatat64", state);
+            at_apis_passed = at_apis_passed && bad_fstatat_result.status == ExecutionStatus::Completed
+                && std::bit_cast<std::int32_t>(bad_fstatat_state.r[0]) == -1
+                && memory.read_u32(thunks.errno_cell()).value_or(0U) == EINVAL;
             state = {};
             state.r[0] = static_cast<std::uint32_t>(openat_directory_fd);
             state.r[1] = kGuestData + 0x980U;
