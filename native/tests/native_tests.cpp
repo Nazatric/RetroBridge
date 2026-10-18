@@ -794,6 +794,9 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
         check(thunks.resolve_symbol("malloc").has_value() && thunks.resolve_symbol("pthread_mutex_lock").has_value()
                 && thunks.resolve_symbol("sqrtf").has_value() && thunks.resolve_symbol("mkdir").has_value()
                 && thunks.resolve_symbol("rename").has_value() && thunks.resolve_symbol("getdents64").has_value()
+                && thunks.resolve_symbol("openat").has_value() && thunks.resolve_symbol("mkdirat").has_value()
+                && thunks.resolve_symbol("unlinkat").has_value() && thunks.resolve_symbol("renameat").has_value()
+                && thunks.resolve_symbol("faccessat").has_value()
                 && thunks.resolve_symbol("__android_log_write").has_value(),
             "Bionic symbol resolver exposes allocator, pthread, libm, file/directory, and logging subsets");
         check(thunks.resolve_guest_symbol("__stack_chk_guard").value_or(0U) == thunks.stack_guard_cell().value()
@@ -1175,6 +1178,101 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
                 && directory_access_result.status == ExecutionStatus::Completed && directory_access_state.r[0] == 0
                 && rmdir_result.status == ExecutionStatus::Completed && rmdir_state.r[0] == 0,
             "Bionic mkdir/access/rmdir operate on app-private directories");
+
+        check(write_guest_string(kGuestData + 0x940U, "/data/user/0/org.retrobridge.native/files/at-dir")
+                && write_guest_string(kGuestData + 0x980U, "child.txt")
+                && write_guest_string(kGuestData + 0x9a0U, "moved.txt")
+                && write_guest_string(kGuestData + 0x9c0U, "nested"),
+            "guest *at API paths are staged");
+        state = {};
+        state.r[0] = std::bit_cast<std::uint32_t>(static_cast<std::int32_t>(AT_FDCWD));
+        state.r[1] = kGuestData + 0x940U;
+        state.r[2] = 0700U;
+        auto [mkdirat_state, mkdirat_result] = invoke("mkdirat", state);
+        state = {};
+        state.r[0] = std::bit_cast<std::uint32_t>(static_cast<std::int32_t>(AT_FDCWD));
+        state.r[1] = kGuestData + 0x940U;
+        state.r[2] = static_cast<std::uint32_t>(O_RDONLY | O_DIRECTORY);
+        auto [openat_directory_state, openat_directory_result] = invoke("openat", state);
+        const auto openat_directory_fd = std::bit_cast<std::int32_t>(openat_directory_state.r[0]);
+        bool at_apis_passed = mkdirat_result.status == ExecutionStatus::Completed && mkdirat_state.r[0] == 0
+            && openat_directory_result.status == ExecutionStatus::Completed && openat_directory_fd >= 3;
+        if (openat_directory_fd >= 3) {
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(openat_directory_fd);
+            state.r[1] = kGuestData + 0x980U;
+            state.r[2] = static_cast<std::uint32_t>(O_CREAT | O_RDWR | O_TRUNC);
+            state.r[3] = 0600U;
+            auto [openat_file_state, openat_file_result] = invoke("openat", state);
+            const auto openat_file_fd = std::bit_cast<std::int32_t>(openat_file_state.r[0]);
+            at_apis_passed = at_apis_passed && openat_file_result.status == ExecutionStatus::Completed
+                && openat_file_fd >= 3;
+            if (openat_file_fd >= 3) {
+                state = {};
+                state.r[0] = static_cast<std::uint32_t>(openat_file_fd);
+                auto [close_at_file_state, close_at_file_result] = invoke("close", state);
+                at_apis_passed = at_apis_passed && close_at_file_result.status == ExecutionStatus::Completed
+                    && close_at_file_state.r[0] == 0;
+            }
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(openat_directory_fd);
+            state.r[1] = kGuestData + 0x980U;
+            state.r[2] = F_OK;
+            auto [faccessat_state, faccessat_result] = invoke("faccessat", state);
+            at_apis_passed = at_apis_passed && faccessat_result.status == ExecutionStatus::Completed
+                && faccessat_state.r[0] == 0;
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(openat_directory_fd);
+            state.r[1] = kGuestData + 0x980U;
+            state.r[2] = static_cast<std::uint32_t>(openat_directory_fd);
+            state.r[3] = kGuestData + 0x9a0U;
+            auto [renameat_state, renameat_result] = invoke("renameat", state);
+            at_apis_passed = at_apis_passed && renameat_result.status == ExecutionStatus::Completed
+                && renameat_state.r[0] == 0;
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(openat_directory_fd);
+            state.r[1] = kGuestData + 0x9c0U;
+            state.r[2] = 0700U;
+            auto [relative_mkdirat_state, relative_mkdirat_result] = invoke("mkdirat", state);
+            at_apis_passed = at_apis_passed && relative_mkdirat_result.status == ExecutionStatus::Completed
+                && relative_mkdirat_state.r[0] == 0;
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(openat_directory_fd);
+            state.r[1] = kGuestData + 0x9a0U;
+            state.r[2] = 0U;
+            auto [unlinkat_file_state, unlinkat_file_result] = invoke("unlinkat", state);
+            at_apis_passed = at_apis_passed && unlinkat_file_result.status == ExecutionStatus::Completed
+                && unlinkat_file_state.r[0] == 0;
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(openat_directory_fd);
+            state.r[1] = kGuestData + 0x9c0U;
+            state.r[2] = static_cast<std::uint32_t>(AT_REMOVEDIR);
+            auto [unlinkat_directory_state, unlinkat_directory_result] = invoke("unlinkat", state);
+            at_apis_passed = at_apis_passed && unlinkat_directory_result.status == ExecutionStatus::Completed
+                && unlinkat_directory_state.r[0] == 0;
+            state = {};
+            state.r[0] = 99U;
+            state.r[1] = kGuestData + 0x9a0U;
+            state.r[2] = F_OK;
+            auto [bad_faccessat_state, bad_faccessat_result] = invoke("faccessat", state);
+            at_apis_passed = at_apis_passed && bad_faccessat_result.status == ExecutionStatus::Completed
+                && std::bit_cast<std::int32_t>(bad_faccessat_state.r[0]) == -1
+                && memory.read_u32(thunks.errno_cell()).value_or(0U) == EBADF;
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(openat_directory_fd);
+            auto [close_at_directory_state, close_at_directory_result] = invoke("close", state);
+            at_apis_passed = at_apis_passed && close_at_directory_result.status == ExecutionStatus::Completed
+                && close_at_directory_state.r[0] == 0;
+            state = {};
+            state.r[0] = std::bit_cast<std::uint32_t>(static_cast<std::int32_t>(AT_FDCWD));
+            state.r[1] = kGuestData + 0x940U;
+            state.r[2] = static_cast<std::uint32_t>(AT_REMOVEDIR);
+            auto [remove_at_root_state, remove_at_root_result] = invoke("unlinkat", state);
+            at_apis_passed = at_apis_passed && remove_at_root_result.status == ExecutionStatus::Completed
+                && remove_at_root_state.r[0] == 0;
+        }
+        check(at_apis_passed,
+            "Bionic openat/mkdirat/unlinkat/renameat/faccessat honor app-private directory descriptors");
 
         check(write_guest_string(kGuestData + 0x900U, "RetroBridge")
                 && write_guest_string(kGuestData + 0x920U, "Bionic log thunk executed"),

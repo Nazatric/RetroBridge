@@ -260,6 +260,84 @@ bool GuestBionicThunks::install(std::string* diagnostic) {
                 }
                 return GuestHookResult{};
             })
+            || !bind("openat", [this](GuestCpuState32& state, GuestMemory&) {
+                const auto path = read_c_string(state.r[1]);
+                if (vfs_ == nullptr) {
+                    set_errno(ENOSYS);
+                    state.r[0] = as_u32(-1);
+                } else if (!path.has_value()) {
+                    set_errno(EFAULT);
+                    state.r[0] = as_u32(-1);
+                } else {
+                    const auto result = vfs_->openat(as_i32(state.r[0]), *path, as_i32(state.r[2]), state.r[3]);
+                    if (result < 0) set_errno(errno);
+                    state.r[0] = as_u32(result);
+                }
+                return GuestHookResult{};
+            })
+            || !bind("mkdirat", [this](GuestCpuState32& state, GuestMemory&) {
+                const auto path = read_c_string(state.r[1]);
+                if (vfs_ == nullptr) {
+                    set_errno(ENOSYS);
+                    state.r[0] = as_u32(-1);
+                } else if (!path.has_value()) {
+                    set_errno(EFAULT);
+                    state.r[0] = as_u32(-1);
+                } else {
+                    const auto result = vfs_->mkdirat(as_i32(state.r[0]), *path, state.r[2]);
+                    if (result != 0) set_errno(errno);
+                    state.r[0] = as_u32(result);
+                }
+                return GuestHookResult{};
+            })
+            || !bind("unlinkat", [this](GuestCpuState32& state, GuestMemory&) {
+                const auto path = read_c_string(state.r[1]);
+                if (vfs_ == nullptr) {
+                    set_errno(ENOSYS);
+                    state.r[0] = as_u32(-1);
+                } else if (!path.has_value()) {
+                    set_errno(EFAULT);
+                    state.r[0] = as_u32(-1);
+                } else {
+                    const auto result = vfs_->unlinkat(as_i32(state.r[0]), *path, as_i32(state.r[2]));
+                    if (result != 0) set_errno(errno);
+                    state.r[0] = as_u32(result);
+                }
+                return GuestHookResult{};
+            })
+            || !bind("renameat", [this](GuestCpuState32& state, GuestMemory&) {
+                const auto old_path = read_c_string(state.r[1]);
+                const auto new_path = read_c_string(state.r[3]);
+                if (vfs_ == nullptr) {
+                    set_errno(ENOSYS);
+                    state.r[0] = as_u32(-1);
+                } else if (!old_path.has_value() || !new_path.has_value()) {
+                    set_errno(EFAULT);
+                    state.r[0] = as_u32(-1);
+                } else {
+                    const auto result = vfs_->renameat(
+                        as_i32(state.r[0]), *old_path, as_i32(state.r[2]), *new_path);
+                    if (result != 0) set_errno(errno);
+                    state.r[0] = as_u32(result);
+                }
+                return GuestHookResult{};
+            })
+            || !bind("faccessat", [this](GuestCpuState32& state, GuestMemory&) {
+                const auto path = read_c_string(state.r[1]);
+                if (vfs_ == nullptr) {
+                    set_errno(ENOSYS);
+                    state.r[0] = as_u32(-1);
+                } else if (!path.has_value()) {
+                    set_errno(EFAULT);
+                    state.r[0] = as_u32(-1);
+                } else {
+                    const auto result = vfs_->faccessat(
+                        as_i32(state.r[0]), *path, as_i32(state.r[2]), as_i32(state.r[3]));
+                    if (result != 0) set_errno(errno);
+                    state.r[0] = as_u32(result);
+                }
+                return GuestHookResult{};
+            })
             || !bind("getdents64", [this](GuestCpuState32& state, GuestMemory&) { return file_getdents64(state); })
             || !bind("__getdents64", [this](GuestCpuState32& state, GuestMemory&) { return file_getdents64(state); })
             || !bind("pthread_mutex_init", [this](GuestCpuState32& state, GuestMemory&) {
