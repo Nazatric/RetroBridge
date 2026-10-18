@@ -2891,7 +2891,7 @@ void test_a32_t32_execution_svc_and_trampolines() {
     put_u16(thumb_register_offset_program, 14, 0x6017U);
     put_u16(thumb_register_offset_program, 16, 0xf801U); // strb r8, [r1, r5]
     put_u16(thumb_register_offset_program, 18, 0x8005U);
-    put_u16(thumb_register_offset_program, 20, 0xf891U); // ldrb r9, [r1, r5]
+    put_u16(thumb_register_offset_program, 20, 0xf811U); // ldrb r9, [r1, r5]
     put_u16(thumb_register_offset_program, 22, 0x9005U);
     put_u16(thumb_register_offset_program, 24, 0x2701U); // movs r7, #1
     put_u16(thumb_register_offset_program, 26, 0xdf00U); // svc #0
