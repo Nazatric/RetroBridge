@@ -2858,6 +2858,30 @@ void test_a32_t32_execution_svc_and_trampolines() {
             && memory.read_u32(GuestAddress32{0xb006U}).value_or(0U) == 0x00001234U,
         "A32 STRH/LDRH/LDRSB/LDRSH cover register/immediate offsets, sign extension, and pre/post-index writeback");
 
+    check(memory.map_zeroed(GuestAddress32{0xc000U}, 0x100U,
+            GuestPermission::Read | GuestPermission::Write),
+        "A32 doubleword-transfer data maps read/write");
+    std::vector<std::byte> arm_doubleword_program(16, std::byte{0});
+    put_u32(arm_doubleword_program, 0, 0xe1e120f8U); // strd r2, r3, [r1, #8]!
+    put_u32(arm_doubleword_program, 4, 0xe0c140d8U); // ldrd r4, r5, [r1], #8
+    put_u32(arm_doubleword_program, 8, 0xe3a07001U); // mov r7, #1
+    put_u32(arm_doubleword_program, 12, 0xef000000U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x5200U}, arm_doubleword_program, arm_doubleword_program.size(),
+            GuestPermission::Read | GuestPermission::Execute),
+        "A32 doubleword-transfer test code maps RX");
+    GuestCpuState32 arm_doubleword_state{};
+    arm_doubleword_state.r[1] = 0xc000U;
+    arm_doubleword_state.r[2] = 0x11223344U;
+    arm_doubleword_state.r[3] = 0x55667788U;
+    const auto arm_doubleword_result = interpreter.run(arm_doubleword_state, GuestAddress32{0x5200U}, 16);
+    check(arm_doubleword_result.status == ExecutionStatus::Completed
+            && arm_doubleword_state.r[1] == 0xc010U
+            && arm_doubleword_state.r[4] == 0x11223344U
+            && arm_doubleword_state.r[5] == 0x55667788U
+            && memory.read_u32(GuestAddress32{0xc008U}).value_or(0U) == 0x11223344U
+            && memory.read_u32(GuestAddress32{0xc00cU}).value_or(0U) == 0x55667788U,
+        "A32 STRD/LDRD transfer register pairs in order and apply immediate address writeback");
+
     std::vector<std::byte> thumb_program(8, std::byte{0});
     put_u16(thumb_program, 0, 0x2007U); // movs r0, #7
     put_u16(thumb_program, 2, 0x3001U); // adds r0, #1

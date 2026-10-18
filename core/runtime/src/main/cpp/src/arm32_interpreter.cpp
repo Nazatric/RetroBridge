@@ -543,19 +543,33 @@ void write_vfp_double(GuestCpuState32& state, unsigned index, std::uint64_t valu
         if (!pre_index && encoded_writeback) return fault("A32 unprivileged halfword transfer is unsupported");
         unsigned transfer_size = 2;
         bool signed_load = false;
-        if (operation == 0U || (operation != 1U && !load)) {
-            return fault("unsupported A32 doubleword or swap transfer encoding");
-        }
+        bool doubleword_transfer = false;
+        if (operation == 0U) return fault("unsupported A32 swap transfer encoding");
         if (operation == 2U) {
-            transfer_size = 1;
-            signed_load = true;
+            if (load) {
+                transfer_size = 1;
+                signed_load = true;
+            } else {
+                transfer_size = 8;
+                doubleword_transfer = true;
+            }
         } else if (operation == 3U) {
-            signed_load = true;
+            if (load) {
+                signed_load = true;
+            } else {
+                transfer_size = 8;
+                doubleword_transfer = true;
+            }
         }
-        if (rn == 15U || rd == 15U || (!load && operation != 1U)) {
-            return fault("A32 halfword/signed transfer uses an unsupported PC or store encoding");
+        if (rn == 15U || rd == 15U || (doubleword_transfer && ((rd & 1U) != 0 || rd > 12U))) {
+            return fault("A32 halfword/doubleword transfer uses an unsupported PC or register pair");
         }
-        if (writeback && rn == rd) return fault("A32 halfword transfer writeback uses the same base and destination register");
+        if (writeback && (rn == rd || (doubleword_transfer && rn == rd + 1U))) {
+            return fault("A32 halfword/doubleword transfer writeback overlaps its base and destination registers");
+        }
+        if (!load && operation != 1U && !doubleword_transfer) {
+            return fault("unsupported A32 signed store encoding");
+        }
 
         std::uint32_t offset = 0;
         if (immediate_offset) {
@@ -583,10 +597,28 @@ void write_vfp_double(GuestCpuState32& state, unsigned index, std::uint64_t valu
         if (address_end > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) + 1U) {
             return fault("A32 halfword transfer access wraps the guest address space");
         }
-        if (transfer_size == 2U && (address & 1U) != 0) {
-            return fault("A32 halfword transfer address is not halfword-aligned");
+        if ((transfer_size == 2U && (address & 1U) != 0)
+            || (doubleword_transfer && (address & 3U) != 0)) {
+            return fault("A32 halfword/doubleword transfer address is not naturally aligned");
         }
-        if (load) {
+        if (doubleword_transfer) {
+            const auto permission = load ? GuestPermission::Read : GuestPermission::Write;
+            if (!memory.is_accessible(GuestAddress32{address}, transfer_size, permission)) {
+                return fault(load ? "A32 doubleword load accessed unreadable guest memory"
+                                  : "A32 doubleword store accessed read-only guest memory");
+            }
+            const auto second_address = static_cast<std::uint32_t>(address + sizeof(std::uint32_t));
+            if (load) {
+                const auto low = memory.read_u32(GuestAddress32{address});
+                const auto high = memory.read_u32(GuestAddress32{second_address});
+                if (!low.has_value() || !high.has_value()) return fault("A32 doubleword load failed after range validation");
+                state.r[rd] = *low;
+                state.r[rd + 1U] = *high;
+            } else if (!memory.write_u32(GuestAddress32{address}, state.r[rd])
+                || !memory.write_u32(GuestAddress32{second_address}, state.r[rd + 1U])) {
+                return fault("A32 doubleword store failed after range validation");
+            }
+        } else if (load) {
             std::uint32_t value = 0;
             if (!read_guest_value(memory, address, transfer_size, value, signed_load)) {
                 return fault("A32 halfword/signed load accessed unreadable guest memory");
