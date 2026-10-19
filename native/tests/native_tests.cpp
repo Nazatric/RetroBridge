@@ -2960,6 +2960,27 @@ void test_a32_t32_execution_svc_and_trampolines() {
             && (arm_long_multiply_state.cpsr & 0xf0000000U) == 0x30000000U,
         "A32 SMULL/UMULL/SMLAL/UMLAL compute full 64-bit results and preserve unaffected flags");
 
+    std::vector<std::byte> arm_clz_program(24, std::byte{0});
+    put_u32(arm_clz_program, 0, 0xe16f2f10U);  // clz r2, r0
+    put_u32(arm_clz_program, 4, 0xe16f3f11U);  // clz r3, r1
+    put_u32(arm_clz_program, 8, 0xe16f4f15U);  // clz r4, r5
+    put_u32(arm_clz_program, 12, 0xe16f6f16U); // clz r6, r6
+    put_u32(arm_clz_program, 16, 0xe3a07001U); // mov r7, #1
+    put_u32(arm_clz_program, 20, 0xef000000U); // svc #0
+    check(memory.map_bytes(GuestAddress32{0x5400U}, arm_clz_program,
+            arm_clz_program.size(), GuestPermission::Read | GuestPermission::Execute),
+        "A32 CLZ test code maps RX");
+    GuestCpuState32 arm_clz_state{};
+    arm_clz_state.r[0] = 0x00001000U;
+    arm_clz_state.r[1] = 0U;
+    arm_clz_state.r[5] = 0x80000000U;
+    arm_clz_state.r[6] = 0x40000000U;
+    const auto arm_clz_result = interpreter.run(arm_clz_state, GuestAddress32{0x5400U}, 16);
+    check(arm_clz_result.status == ExecutionStatus::Completed
+            && arm_clz_state.r[2] == 19U && arm_clz_state.r[3] == 32U
+            && arm_clz_state.r[4] == 0U && arm_clz_state.r[6] == 1U,
+        "A32 CLZ handles zero, the sign bit, middle-bit positions, and a source/destination alias");
+
     std::vector<std::byte> thumb_program(8, std::byte{0});
     put_u16(thumb_program, 0, 0x2007U); // movs r0, #7
     put_u16(thumb_program, 2, 0x3001U); // adds r0, #1

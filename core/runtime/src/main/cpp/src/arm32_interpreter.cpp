@@ -365,6 +365,14 @@ void write_vfp_double(GuestCpuState32& state, unsigned index, std::uint64_t valu
         return {};
     }
 
+    if ((instruction & 0x0fff0ff0U) == 0x016f0f10U) {
+        const auto rd = (instruction >> 12U) & 0xfU;
+        const auto rm = instruction & 0xfU;
+        if (rd == 15U || rm == 15U) return fault("A32 CLZ uses an unpredictable PC operand");
+        state.r[rd] = static_cast<std::uint32_t>(std::countl_zero(state.r[rm]));
+        return {};
+    }
+
     if ((instruction & 0x0ff00000U) == 0x03000000U
         || (instruction & 0x0ff00000U) == 0x03400000U) {
         const auto rd = (instruction >> 12U) & 0xfU;
