@@ -792,6 +792,8 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
         if (!diagnostic.empty()) std::cerr << "Bionic thunk diagnostic: " << diagnostic << '\n';
         check(thunks.installed(), "Bionic thunk table records its initialized state");
         check(thunks.resolve_symbol("malloc").has_value() && thunks.resolve_symbol("pthread_mutex_lock").has_value()
+                && thunks.resolve_symbol("memchr").has_value() && thunks.resolve_symbol("strchr").has_value()
+                && thunks.resolve_symbol("strrchr").has_value()
                 && thunks.resolve_symbol("sqrtf").has_value() && thunks.resolve_symbol("mkdir").has_value()
                 && thunks.resolve_symbol("rename").has_value() && thunks.resolve_symbol("getdents64").has_value()
                 && thunks.resolve_symbol("openat").has_value() && thunks.resolve_symbol("mkdirat").has_value()
@@ -903,7 +905,8 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
 
         check(write_guest_string(kGuestData + 0x200U, "guest")
                 && write_guest_string(kGuestData + 0x220U, "guest")
-                && write_guest_string(kGuestData + 0x240U, "guest!"),
+                && write_guest_string(kGuestData + 0x240U, "guest!")
+                && write_guest_string(kGuestData + 0x2a0U, "letter"),
             "Bionic string fixtures are staged in guest memory");
         state = {};
         state.r[0] = kGuestData + 0x200U;
@@ -924,6 +927,27 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
         check(strncmp_result.status == ExecutionStatus::Completed && strncmp_equal.r[0] == 0,
             "guest strncmp compares at most the requested bytes");
         state = {};
+        state.r[0] = kGuestData + 0x200U;
+        state.r[1] = static_cast<std::uint32_t>('s');
+        auto [strchr_state, strchr_result] = invoke("strchr", state);
+        check(strchr_result.status == ExecutionStatus::Completed && strchr_state.r[0] == kGuestData + 0x203U,
+            "guest strchr returns the first matching byte address");
+        state.r[1] = 0U;
+        auto [strchr_nul_state, strchr_nul_result] = invoke("strchr", state);
+        check(strchr_nul_result.status == ExecutionStatus::Completed
+                && strchr_nul_state.r[0] == kGuestData + 0x205U
+                && memory.read_u8(GuestAddress32{strchr_nul_state.r[0]}).value_or(1U) == 0U,
+            "guest strchr can return the terminating NUL address");
+        state.r[0] = kGuestData + 0x2a0U;
+        state.r[1] = static_cast<std::uint32_t>('t');
+        auto [strrchr_state, strrchr_result] = invoke("strrchr", state);
+        check(strrchr_result.status == ExecutionStatus::Completed && strrchr_state.r[0] == kGuestData + 0x2a3U,
+            "guest strrchr returns the last of two matching characters");
+        state.r[1] = static_cast<std::uint32_t>('z');
+        auto [strrchr_missing_state, strrchr_missing_result] = invoke("strrchr", state);
+        check(strrchr_missing_result.status == ExecutionStatus::Completed && strrchr_missing_state.r[0] == 0,
+            "guest strrchr returns null when a byte is absent");
+        state = {};
         state.r[0] = kGuestData + 0x260U;
         state.r[1] = kGuestData + 0x200U;
         state.r[2] = 4;
@@ -943,6 +967,27 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
         state = {};
         state.r[0] = strdup_state.r[0];
         (void)invoke("free", state);
+
+        const std::array<std::byte, 4> binary_search_fixture{
+            std::byte{'A'}, std::byte{0}, std::byte{0xff}, std::byte{'A'}};
+        check(memory.write(GuestAddress32{kGuestData + 0x280U}, binary_search_fixture),
+            "memchr binary fixture is staged");
+        state = {};
+        state.r[0] = kGuestData + 0x280U;
+        state.r[1] = 0x1ffU;
+        state.r[2] = static_cast<std::uint32_t>(binary_search_fixture.size());
+        auto [memchr_state, memchr_result] = invoke("memchr", state);
+        check(memchr_result.status == ExecutionStatus::Completed && memchr_state.r[0] == kGuestData + 0x282U,
+            "guest memchr truncates the search byte and returns a binary-buffer address");
+        state.r[1] = 0U;
+        auto [memchr_nul_state, memchr_nul_result] = invoke("memchr", state);
+        check(memchr_nul_result.status == ExecutionStatus::Completed
+                && memchr_nul_state.r[0] == kGuestData + 0x281U,
+            "guest memchr searches through embedded NUL bytes within the requested length");
+        state.r[1] = static_cast<std::uint32_t>('z');
+        auto [memchr_missing_state, memchr_missing_result] = invoke("memchr", state);
+        check(memchr_missing_result.status == ExecutionStatus::Completed && memchr_missing_state.r[0] == 0,
+            "guest memchr returns null when the byte is absent");
 
         const std::array<std::byte, 5> overlap_source{std::byte{'a'}, std::byte{'b'}, std::byte{'c'}, std::byte{'d'}, std::byte{'e'}};
         check(memory.write(GuestAddress32{kGuestData + 0x300U}, overlap_source), "memmove overlap fixture is staged");

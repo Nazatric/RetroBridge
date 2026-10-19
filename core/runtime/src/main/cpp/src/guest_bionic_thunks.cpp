@@ -167,7 +167,10 @@ bool GuestBionicThunks::install(std::string* diagnostic) {
             || !bind("__aeabi_memclr4", [this](GuestCpuState32& state, GuestMemory&) { return set_memory(state, true, true); })
             || !bind("__aeabi_memclr8", [this](GuestCpuState32& state, GuestMemory&) { return set_memory(state, true, true); })
             || !bind("memcmp", [this](GuestCpuState32& state, GuestMemory&) { return compare_memory(state); })
+            || !bind("memchr", [this](GuestCpuState32& state, GuestMemory&) { return find_memory_character(state); })
             || !bind("strlen", [this](GuestCpuState32& state, GuestMemory&) { return string_length(state); })
+            || !bind("strchr", [this](GuestCpuState32& state, GuestMemory&) { return find_string_character(state, false); })
+            || !bind("strrchr", [this](GuestCpuState32& state, GuestMemory&) { return find_string_character(state, true); })
             || !bind("strcmp", [this](GuestCpuState32& state, GuestMemory&) { return string_compare(state, false); })
             || !bind("strncmp", [this](GuestCpuState32& state, GuestMemory&) { return string_compare(state, true); })
             || !bind("strcpy", [this](GuestCpuState32& state, GuestMemory&) { return string_copy(state, false); })
@@ -838,6 +841,27 @@ GuestHookResult GuestBionicThunks::compare_memory(GuestCpuState32& state) {
     return {};
 }
 
+GuestHookResult GuestBionicThunks::find_memory_character(GuestCpuState32& state) {
+    const auto size = static_cast<std::size_t>(state.r[2]);
+    std::vector<std::byte> bytes;
+    if (!read_bytes(state.r[0], size, bytes)) {
+        set_errno(size > kMaxMemoryOperation ? EINVAL : EFAULT);
+        state.r[0] = 0;
+        return {};
+    }
+    const auto wanted = static_cast<std::byte>(state.r[1] & 0xffU);
+    const auto found = std::find(bytes.begin(), bytes.end(), wanted);
+    if (found == bytes.end()) {
+        state.r[0] = 0;
+    } else {
+        const auto result = static_cast<std::uint64_t>(state.r[0])
+            + static_cast<std::uint64_t>(static_cast<std::size_t>(found - bytes.begin()));
+        state.r[0] = result <= std::numeric_limits<std::uint32_t>::max()
+            ? static_cast<std::uint32_t>(result) : 0U;
+    }
+    return {};
+}
+
 GuestHookResult GuestBionicThunks::string_length(GuestCpuState32& state) {
     const auto value = read_c_string(state.r[0], kMaxStringOperation);
     if (!value.has_value()) {
@@ -846,6 +870,42 @@ GuestHookResult GuestBionicThunks::string_length(GuestCpuState32& state) {
     } else {
         state.r[0] = static_cast<std::uint32_t>(value->size());
     }
+    return {};
+}
+
+GuestHookResult GuestBionicThunks::find_string_character(GuestCpuState32& state, bool reverse) {
+    const auto text = read_c_string(state.r[0], kMaxStringOperation);
+    if (!text.has_value()) {
+        set_errno(EFAULT);
+        state.r[0] = 0;
+        return {};
+    }
+    const auto wanted = static_cast<unsigned char>(state.r[1] & 0xffU);
+    std::optional<std::size_t> offset;
+    if (wanted == 0) {
+        offset = text->size();
+    } else if (reverse) {
+        for (std::size_t index = text->size(); index > 0; --index) {
+            if (static_cast<unsigned char>((*text)[index - 1U]) == wanted) {
+                offset = index - 1U;
+                break;
+            }
+        }
+    } else {
+        for (std::size_t index = 0; index < text->size(); ++index) {
+            if (static_cast<unsigned char>((*text)[index]) == wanted) {
+                offset = index;
+                break;
+            }
+        }
+    }
+    if (!offset.has_value()) {
+        state.r[0] = 0;
+        return {};
+    }
+    const auto result = static_cast<std::uint64_t>(state.r[0]) + *offset;
+    state.r[0] = result <= std::numeric_limits<std::uint32_t>::max()
+        ? static_cast<std::uint32_t>(result) : 0U;
     return {};
 }
 
