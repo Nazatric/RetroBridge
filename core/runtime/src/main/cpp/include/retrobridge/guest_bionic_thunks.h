@@ -56,8 +56,9 @@ private:
     [[nodiscard]] GuestHookResult copy_memory(GuestCpuState32& state, bool move);
     [[nodiscard]] GuestHookResult set_memory(GuestCpuState32& state, bool aeabi_order, bool clear);
     [[nodiscard]] GuestHookResult compare_memory(GuestCpuState32& state);
-    [[nodiscard]] GuestHookResult find_memory_character(GuestCpuState32& state);
+    [[nodiscard]] GuestHookResult find_memory_character(GuestCpuState32& state, bool reverse);
     [[nodiscard]] GuestHookResult string_length(GuestCpuState32& state);
+    [[nodiscard]] GuestHookResult bounded_string_length(GuestCpuState32& state);
     [[nodiscard]] GuestHookResult find_string_character(GuestCpuState32& state, bool reverse);
     [[nodiscard]] GuestHookResult string_compare(GuestCpuState32& state, bool bounded);
     [[nodiscard]] GuestHookResult string_copy(GuestCpuState32& state, bool bounded);

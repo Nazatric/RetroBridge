@@ -792,8 +792,9 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
         if (!diagnostic.empty()) std::cerr << "Bionic thunk diagnostic: " << diagnostic << '\n';
         check(thunks.installed(), "Bionic thunk table records its initialized state");
         check(thunks.resolve_symbol("malloc").has_value() && thunks.resolve_symbol("pthread_mutex_lock").has_value()
-                && thunks.resolve_symbol("memchr").has_value() && thunks.resolve_symbol("strchr").has_value()
-                && thunks.resolve_symbol("strrchr").has_value()
+                && thunks.resolve_symbol("memchr").has_value() && thunks.resolve_symbol("memrchr").has_value()
+                && thunks.resolve_symbol("strnlen").has_value()
+                && thunks.resolve_symbol("strchr").has_value() && thunks.resolve_symbol("strrchr").has_value()
                 && thunks.resolve_symbol("__aeabi_lmul").has_value()
                 && thunks.resolve_symbol("__aeabi_llsl").has_value()
                 && thunks.resolve_symbol("__aeabi_llsr").has_value()
@@ -952,6 +953,21 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
         check(strrchr_missing_result.status == ExecutionStatus::Completed && strrchr_missing_state.r[0] == 0,
             "guest strrchr returns null when a byte is absent");
         state = {};
+        state.r[0] = kGuestData + 0x200U;
+        state.r[1] = 3U;
+        auto [strnlen_short_state, strnlen_short_result] = invoke("strnlen", state);
+        check(strnlen_short_result.status == ExecutionStatus::Completed && strnlen_short_state.r[0] == 3U,
+            "guest strnlen stops at its byte limit when no NUL occurs earlier");
+        state.r[1] = 8U;
+        auto [strnlen_nul_state, strnlen_nul_result] = invoke("strnlen", state);
+        check(strnlen_nul_result.status == ExecutionStatus::Completed && strnlen_nul_state.r[0] == 5U,
+            "guest strnlen returns the string length when its NUL is within the limit");
+        state.r[0] = 0xffffffffU;
+        state.r[1] = 0U;
+        auto [strnlen_empty_state, strnlen_empty_result] = invoke("strnlen", state);
+        check(strnlen_empty_result.status == ExecutionStatus::Completed && strnlen_empty_state.r[0] == 0U,
+            "guest strnlen with a zero limit does not dereference its pointer");
+        state = {};
         state.r[0] = kGuestData + 0x260U;
         state.r[1] = kGuestData + 0x200U;
         state.r[2] = 4;
@@ -992,6 +1008,15 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
         auto [memchr_missing_state, memchr_missing_result] = invoke("memchr", state);
         check(memchr_missing_result.status == ExecutionStatus::Completed && memchr_missing_state.r[0] == 0,
             "guest memchr returns null when the byte is absent");
+        state.r[1] = static_cast<std::uint32_t>('A');
+        auto [memrchr_state, memrchr_result] = invoke("memrchr", state);
+        check(memrchr_result.status == ExecutionStatus::Completed && memrchr_state.r[0] == kGuestData + 0x283U,
+            "guest memrchr returns the last matching byte in the bounded buffer");
+        state.r[2] = 3U;
+        auto [memrchr_bounded_state, memrchr_bounded_result] = invoke("memrchr", state);
+        check(memrchr_bounded_result.status == ExecutionStatus::Completed
+                && memrchr_bounded_state.r[0] == kGuestData + 0x280U,
+            "guest memrchr does not search beyond the requested byte count");
 
         const std::array<std::byte, 5> overlap_source{std::byte{'a'}, std::byte{'b'}, std::byte{'c'}, std::byte{'d'}, std::byte{'e'}};
         check(memory.write(GuestAddress32{kGuestData + 0x300U}, overlap_source), "memmove overlap fixture is staged");

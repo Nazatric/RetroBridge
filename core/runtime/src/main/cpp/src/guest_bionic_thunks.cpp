@@ -167,8 +167,10 @@ bool GuestBionicThunks::install(std::string* diagnostic) {
             || !bind("__aeabi_memclr4", [this](GuestCpuState32& state, GuestMemory&) { return set_memory(state, true, true); })
             || !bind("__aeabi_memclr8", [this](GuestCpuState32& state, GuestMemory&) { return set_memory(state, true, true); })
             || !bind("memcmp", [this](GuestCpuState32& state, GuestMemory&) { return compare_memory(state); })
-            || !bind("memchr", [this](GuestCpuState32& state, GuestMemory&) { return find_memory_character(state); })
+            || !bind("memchr", [this](GuestCpuState32& state, GuestMemory&) { return find_memory_character(state, false); })
+            || !bind("memrchr", [this](GuestCpuState32& state, GuestMemory&) { return find_memory_character(state, true); })
             || !bind("strlen", [this](GuestCpuState32& state, GuestMemory&) { return string_length(state); })
+            || !bind("strnlen", [this](GuestCpuState32& state, GuestMemory&) { return bounded_string_length(state); })
             || !bind("strchr", [this](GuestCpuState32& state, GuestMemory&) { return find_string_character(state, false); })
             || !bind("strrchr", [this](GuestCpuState32& state, GuestMemory&) { return find_string_character(state, true); })
             || !bind("strcmp", [this](GuestCpuState32& state, GuestMemory&) { return string_compare(state, false); })
@@ -868,7 +870,7 @@ GuestHookResult GuestBionicThunks::compare_memory(GuestCpuState32& state) {
     return {};
 }
 
-GuestHookResult GuestBionicThunks::find_memory_character(GuestCpuState32& state) {
+GuestHookResult GuestBionicThunks::find_memory_character(GuestCpuState32& state, bool reverse) {
     const auto size = static_cast<std::size_t>(state.r[2]);
     std::vector<std::byte> bytes;
     if (!read_bytes(state.r[0], size, bytes)) {
@@ -877,12 +879,22 @@ GuestHookResult GuestBionicThunks::find_memory_character(GuestCpuState32& state)
         return {};
     }
     const auto wanted = static_cast<std::byte>(state.r[1] & 0xffU);
-    const auto found = std::find(bytes.begin(), bytes.end(), wanted);
-    if (found == bytes.end()) {
+    std::optional<std::size_t> offset;
+    if (reverse) {
+        for (std::size_t index = bytes.size(); index > 0; --index) {
+            if (bytes[index - 1U] == wanted) {
+                offset = index - 1U;
+                break;
+            }
+        }
+    } else {
+        const auto found = std::find(bytes.begin(), bytes.end(), wanted);
+        if (found != bytes.end()) offset = static_cast<std::size_t>(found - bytes.begin());
+    }
+    if (!offset.has_value()) {
         state.r[0] = 0;
     } else {
-        const auto result = static_cast<std::uint64_t>(state.r[0])
-            + static_cast<std::uint64_t>(static_cast<std::size_t>(found - bytes.begin()));
+        const auto result = static_cast<std::uint64_t>(state.r[0]) + *offset;
         state.r[0] = result <= std::numeric_limits<std::uint32_t>::max()
             ? static_cast<std::uint32_t>(result) : 0U;
     }
@@ -896,6 +908,37 @@ GuestHookResult GuestBionicThunks::string_length(GuestCpuState32& state) {
         state.r[0] = 0;
     } else {
         state.r[0] = static_cast<std::uint32_t>(value->size());
+    }
+    return {};
+}
+
+GuestHookResult GuestBionicThunks::bounded_string_length(GuestCpuState32& state) {
+    const auto requested = static_cast<std::size_t>(state.r[1]);
+    const auto scan_limit = std::min(requested, kMaxStringOperation);
+    const auto base = static_cast<std::uint64_t>(state.r[0]);
+    for (std::size_t index = 0; index < scan_limit; ++index) {
+        const auto address = base + index;
+        if (address > std::numeric_limits<std::uint32_t>::max()) {
+            set_errno(EFAULT);
+            state.r[0] = 0;
+            return {};
+        }
+        const auto value = memory_.read_u8(GuestAddress32{static_cast<std::uint32_t>(address)});
+        if (!value.has_value()) {
+            set_errno(EFAULT);
+            state.r[0] = 0;
+            return {};
+        }
+        if (*value == 0) {
+            state.r[0] = static_cast<std::uint32_t>(index);
+            return {};
+        }
+    }
+    if (requested > scan_limit) {
+        set_errno(EINVAL);
+        state.r[0] = 0;
+    } else {
+        state.r[0] = static_cast<std::uint32_t>(requested);
     }
     return {};
 }
