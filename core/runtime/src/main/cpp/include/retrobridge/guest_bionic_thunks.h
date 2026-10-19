@@ -69,6 +69,8 @@ private:
     [[nodiscard]] GuestHookResult file_close(GuestCpuState32& state);
     [[nodiscard]] GuestHookResult file_read(GuestCpuState32& state);
     [[nodiscard]] GuestHookResult file_write(GuestCpuState32& state);
+    [[nodiscard]] GuestHookResult file_pread(GuestCpuState32& state);
+    [[nodiscard]] GuestHookResult file_pwrite(GuestCpuState32& state);
     [[nodiscard]] GuestHookResult file_seek(GuestCpuState32& state);
     [[nodiscard]] GuestHookResult file_seek64(GuestCpuState32& state);
     [[nodiscard]] GuestHookResult file_stat64(GuestCpuState32& state, bool no_follow);

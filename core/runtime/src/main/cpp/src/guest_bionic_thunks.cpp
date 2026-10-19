@@ -194,6 +194,8 @@ bool GuestBionicThunks::install(std::string* diagnostic) {
             || !bind("close", [this](GuestCpuState32& state, GuestMemory&) { return file_close(state); })
             || !bind("read", [this](GuestCpuState32& state, GuestMemory&) { return file_read(state); })
             || !bind("write", [this](GuestCpuState32& state, GuestMemory&) { return file_write(state); })
+            || !bind("pread", [this](GuestCpuState32& state, GuestMemory&) { return file_pread(state); })
+            || !bind("pwrite", [this](GuestCpuState32& state, GuestMemory&) { return file_pwrite(state); })
             || !bind("lseek", [this](GuestCpuState32& state, GuestMemory&) { return file_seek(state); })
             || !bind("lseek64", [this](GuestCpuState32& state, GuestMemory&) { return file_seek64(state); })
             || !bind("stat64", [this](GuestCpuState32& state, GuestMemory&) { return file_stat64(state, false); })
@@ -1197,6 +1199,58 @@ GuestHookResult GuestBionicThunks::file_write(GuestCpuState32& state) {
         return {};
     }
     const auto result = vfs_->write(as_i32(state.r[0]), bytes);
+    if (result < 0) set_errno(errno);
+    state.r[0] = as_u32(static_cast<std::int32_t>(result));
+    return {};
+}
+
+GuestHookResult GuestBionicThunks::file_pread(GuestCpuState32& state) {
+    const auto count = static_cast<std::size_t>(state.r[2]);
+    if (vfs_ == nullptr) {
+        set_errno(ENOSYS);
+        state.r[0] = as_u32(-1);
+        return {};
+    }
+    if (count > kMaxMemoryOperation
+        || (count != 0 && !memory_.is_accessible(GuestAddress32{state.r[1]}, count, GuestPermission::Write))) {
+        set_errno(count > kMaxMemoryOperation ? EINVAL : EFAULT);
+        state.r[0] = as_u32(-1);
+        return {};
+    }
+    std::vector<std::byte> bytes(count);
+    const auto result = vfs_->pread(as_i32(state.r[0]), bytes, as_i32(state.r[3]));
+    if (result < 0) {
+        set_errno(errno);
+        state.r[0] = as_u32(-1);
+    } else if (result > 0 && !memory_.write(GuestAddress32{state.r[1]},
+            std::span<const std::byte>{bytes.data(), static_cast<std::size_t>(result)})) {
+        set_errno(EFAULT);
+        state.r[0] = as_u32(-1);
+    } else {
+        state.r[0] = static_cast<std::uint32_t>(result);
+    }
+    return {};
+}
+
+GuestHookResult GuestBionicThunks::file_pwrite(GuestCpuState32& state) {
+    const auto count = static_cast<std::size_t>(state.r[2]);
+    if (vfs_ == nullptr) {
+        set_errno(ENOSYS);
+        state.r[0] = as_u32(-1);
+        return {};
+    }
+    if (count > kMaxMemoryOperation) {
+        set_errno(EINVAL);
+        state.r[0] = as_u32(-1);
+        return {};
+    }
+    std::vector<std::byte> bytes;
+    if (!read_bytes(state.r[1], count, bytes)) {
+        set_errno(EFAULT);
+        state.r[0] = as_u32(-1);
+        return {};
+    }
+    const auto result = vfs_->pwrite(as_i32(state.r[0]), bytes, as_i32(state.r[3]));
     if (result < 0) set_errno(errno);
     state.r[0] = as_u32(static_cast<std::int32_t>(result));
     return {};

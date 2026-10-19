@@ -129,6 +129,36 @@ long NativeVfs::write(int guest_fd, std::span<const std::byte> input) noexcept {
     return static_cast<long>(::write(descriptor->host_fd, input.data(), input.size()));
 }
 
+long NativeVfs::pread(int guest_fd, std::span<std::byte> output, long long offset) noexcept {
+    if (offset < 0 || static_cast<unsigned long long>(offset)
+            > static_cast<unsigned long long>(std::numeric_limits<off_t>::max())) {
+        errno = EINVAL;
+        return -1;
+    }
+    std::lock_guard lock(mutex_);
+    const auto* descriptor = find_descriptor_locked(guest_fd);
+    if (descriptor == nullptr) {
+        errno = EBADF;
+        return -1;
+    }
+    return static_cast<long>(::pread(descriptor->host_fd, output.data(), output.size(), static_cast<off_t>(offset)));
+}
+
+long NativeVfs::pwrite(int guest_fd, std::span<const std::byte> input, long long offset) noexcept {
+    if (offset < 0 || static_cast<unsigned long long>(offset)
+            > static_cast<unsigned long long>(std::numeric_limits<off_t>::max())) {
+        errno = EINVAL;
+        return -1;
+    }
+    std::lock_guard lock(mutex_);
+    const auto* descriptor = find_descriptor_locked(guest_fd);
+    if (descriptor == nullptr) {
+        errno = EBADF;
+        return -1;
+    }
+    return static_cast<long>(::pwrite(descriptor->host_fd, input.data(), input.size(), static_cast<off_t>(offset)));
+}
+
 long long NativeVfs::seek(int guest_fd, long long offset, int whence) noexcept {
     std::lock_guard lock(mutex_);
     const auto* descriptor = find_descriptor_locked(guest_fd);

@@ -511,10 +511,19 @@ void test_native_vfs_io_and_descriptors() {
     if (fd >= 3) {
         const std::array<std::byte, 5> contents{std::byte{'h'}, std::byte{'e'}, std::byte{'l'}, std::byte{'l'}, std::byte{'o'}};
         check(vfs.write(fd, contents) == 5, "guest writes route into isolated internal storage");
+        std::array<std::byte, 2> positioned_read{};
+        check(vfs.pread(fd, positioned_read, 1) == 2
+                && positioned_read[0] == std::byte{'e'} && positioned_read[1] == std::byte{'l'},
+            "positioned reads retrieve bytes without consuming the shared file position");
+        const std::array<std::byte, 1> replacement{std::byte{'A'}};
+        check(vfs.seek(fd, 0, SEEK_CUR) == 5 && vfs.pwrite(fd, replacement, 1) == 1
+                && vfs.seek(fd, 0, SEEK_CUR) == 5,
+            "positioned writes update a file without changing the shared file position");
         check(vfs.seek(fd, 0, SEEK_SET) == 0, "guest lseek updates the virtual descriptor position");
         std::array<std::byte, 8> readback{};
-        check(vfs.read(fd, readback) == 5 && readback[0] == std::byte{'h'} && readback[4] == std::byte{'o'},
-            "guest reads recover file contents through the VFS");
+        check(vfs.read(fd, readback) == 5 && readback[0] == std::byte{'h'} && readback[1] == std::byte{'A'}
+                && readback[4] == std::byte{'o'},
+            "guest reads recover the positioned-write contents through the VFS");
         struct stat status{};
         check(vfs.fstat(fd, &status) == 0 && status.st_size == 5, "guest fstat reports file metadata");
         check(vfs.close(fd) == 0 && vfs.close(fd) == -1, "guest descriptors close once and stale fds are rejected");
@@ -803,6 +812,7 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
                 && thunks.resolve_symbol("__aeabi_lasr").has_value()
                 && thunks.resolve_symbol("sqrtf").has_value() && thunks.resolve_symbol("mkdir").has_value()
                 && thunks.resolve_symbol("rename").has_value() && thunks.resolve_symbol("getdents64").has_value()
+                && thunks.resolve_symbol("pread").has_value() && thunks.resolve_symbol("pwrite").has_value()
                 && thunks.resolve_symbol("openat").has_value() && thunks.resolve_symbol("mkdirat").has_value()
                 && thunks.resolve_symbol("unlinkat").has_value() && thunks.resolve_symbol("renameat").has_value()
                 && thunks.resolve_symbol("faccessat").has_value() && thunks.resolve_symbol("fstatat64").has_value()
@@ -1193,6 +1203,36 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
             check(write_result.status == ExecutionStatus::Completed && write_state.r[0] == file_bytes.size(),
                 "guest libc write persists bytes through the VFS");
 
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(guest_fd);
+            state.r[1] = kGuestData + 0x540U;
+            state.r[2] = 2U;
+            state.r[3] = 1U;
+            auto [pread_state, pread_result] = invoke("pread", state);
+            std::array<std::byte, 2> positioned_bytes{};
+            check(pread_result.status == ExecutionStatus::Completed && pread_state.r[0] == 2U
+                    && memory.read(GuestAddress32{kGuestData + 0x540U}, positioned_bytes)
+                    && positioned_bytes[0] == std::byte{'u'} && positioned_bytes[1] == std::byte{'n'},
+                "guest libc pread copies bytes from its explicit offset");
+            const std::array<std::byte, 1> positioned_replacement{std::byte{'A'}};
+            check(memory.write(GuestAddress32{kGuestData + 0x550U}, positioned_replacement),
+                "guest libc pwrite replacement byte is staged");
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(guest_fd);
+            state.r[1] = kGuestData + 0x550U;
+            state.r[2] = 1U;
+            state.r[3] = 1U;
+            auto [pwrite_state, pwrite_result] = invoke("pwrite", state);
+            check(pwrite_result.status == ExecutionStatus::Completed && pwrite_state.r[0] == 1U,
+                "guest libc pwrite writes bytes at its explicit offset");
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(guest_fd);
+            state.r[1] = 0U;
+            state.r[2] = SEEK_CUR;
+            auto [positioned_seek_state, positioned_seek_result] = invoke("lseek", state);
+            check(positioned_seek_result.status == ExecutionStatus::Completed && positioned_seek_state.r[0] == file_bytes.size(),
+                "guest pread and pwrite preserve the shared descriptor position");
+
             constexpr auto guest_stat_address = kGuestData + 0xa80U;
             state = {};
             state.r[0] = kGuestData + 0x400U;
@@ -1245,8 +1285,10 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
             state.r[2] = static_cast<std::uint32_t>(file_bytes.size());
             auto [read_state, read_result] = invoke("read", state);
             std::array<std::byte, 6> readback{};
+            const std::array<std::byte, 6> expected_readback{
+                std::byte{'r'}, std::byte{'A'}, std::byte{'n'}, std::byte{'t'}, std::byte{'i'}, std::byte{'m'}};
             check(read_result.status == ExecutionStatus::Completed && read_state.r[0] == file_bytes.size()
-                    && memory.read(GuestAddress32{kGuestData + 0x520U}, readback) && readback == file_bytes,
+                    && memory.read(GuestAddress32{kGuestData + 0x520U}, readback) && readback == expected_readback,
                 "guest libc read copies descriptor bytes back into guest memory");
             state = {};
             state.r[0] = static_cast<std::uint32_t>(guest_fd);
