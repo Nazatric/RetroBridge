@@ -794,6 +794,10 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
         check(thunks.resolve_symbol("malloc").has_value() && thunks.resolve_symbol("pthread_mutex_lock").has_value()
                 && thunks.resolve_symbol("memchr").has_value() && thunks.resolve_symbol("strchr").has_value()
                 && thunks.resolve_symbol("strrchr").has_value()
+                && thunks.resolve_symbol("__aeabi_lmul").has_value()
+                && thunks.resolve_symbol("__aeabi_llsl").has_value()
+                && thunks.resolve_symbol("__aeabi_llsr").has_value()
+                && thunks.resolve_symbol("__aeabi_lasr").has_value()
                 && thunks.resolve_symbol("sqrtf").has_value() && thunks.resolve_symbol("mkdir").has_value()
                 && thunks.resolve_symbol("rename").has_value() && thunks.resolve_symbol("getdents64").has_value()
                 && thunks.resolve_symbol("openat").has_value() && thunks.resolve_symbol("mkdirat").has_value()
@@ -1020,6 +1024,33 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
         auto [div_state, div_result] = invoke("__aeabi_idivmod", state);
         check(div_result.status == ExecutionStatus::Completed && div_state.r[0] == 3U && div_state.r[1] == 2U,
             "ARM EABI signed division helper returns quotient and remainder");
+
+        state = {};
+        state.r[0] = 0xffffffffU;
+        state.r[1] = 2U;
+        state.r[2] = 3U;
+        auto [long_multiply_state, long_multiply_result] = invoke("__aeabi_lmul", state);
+        check(long_multiply_result.status == ExecutionStatus::Completed
+                && long_multiply_state.r[0] == 0xfffffffdU && long_multiply_state.r[1] == 8U,
+            "ARM EABI 64-bit multiply carries across the low/high register pair");
+        state = {};
+        state.r[0] = 1U;
+        state.r[1] = 1U;
+        state.r[2] = 36U;
+        auto [llsl_state, llsl_result] = invoke("__aeabi_llsl", state);
+        check(llsl_result.status == ExecutionStatus::Completed && llsl_state.r[0] == 0U && llsl_state.r[1] == 0x10U,
+            "ARM EABI logical left shift propagates between 32-bit register halves");
+        state = {};
+        state.r[0] = 1U;
+        state.r[1] = 0x80000000U;
+        state.r[2] = 63U;
+        auto [llsr_state, llsr_result] = invoke("__aeabi_llsr", state);
+        check(llsr_result.status == ExecutionStatus::Completed && llsr_state.r[0] == 1U && llsr_state.r[1] == 0U,
+            "ARM EABI logical right shift returns the high bit at the low-bit boundary");
+        auto [lasr_state, lasr_result] = invoke("__aeabi_lasr", state);
+        check(lasr_result.status == ExecutionStatus::Completed
+                && lasr_state.r[0] == 0xffffffffU && lasr_state.r[1] == 0xffffffffU,
+            "ARM EABI arithmetic right shift sign-extends negative 64-bit values");
 
         const auto mutex_address = heap.malloc(64);
         check(mutex_address.has_value(), "guest memory for a synthetic pthread mutex allocates");

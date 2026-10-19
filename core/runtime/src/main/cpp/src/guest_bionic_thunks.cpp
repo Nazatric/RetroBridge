@@ -588,6 +588,33 @@ bool GuestBionicThunks::install(std::string* diagnostic) {
                 }
                 return GuestHookResult{};
             })
+            || !bind("__aeabi_lmul", [](GuestCpuState32& state, GuestMemory&) {
+                const auto product = read_u64(state.r[0], state.r[1]) * read_u64(state.r[2], state.r[3]);
+                state.r[0] = static_cast<std::uint32_t>(product);
+                state.r[1] = static_cast<std::uint32_t>(product >> 32U);
+                return GuestHookResult{};
+            })
+            || !bind("__aeabi_llsl", [](GuestCpuState32& state, GuestMemory&) {
+                const auto value = read_u64(state.r[0], state.r[1]);
+                const auto shifted = value << (state.r[2] & 63U);
+                state.r[0] = static_cast<std::uint32_t>(shifted);
+                state.r[1] = static_cast<std::uint32_t>(shifted >> 32U);
+                return GuestHookResult{};
+            })
+            || !bind("__aeabi_llsr", [](GuestCpuState32& state, GuestMemory&) {
+                const auto value = read_u64(state.r[0], state.r[1]);
+                const auto shifted = value >> (state.r[2] & 63U);
+                state.r[0] = static_cast<std::uint32_t>(shifted);
+                state.r[1] = static_cast<std::uint32_t>(shifted >> 32U);
+                return GuestHookResult{};
+            })
+            || !bind("__aeabi_lasr", [](GuestCpuState32& state, GuestMemory&) {
+                const auto value = std::bit_cast<std::int64_t>(read_u64(state.r[0], state.r[1]));
+                const auto shifted = std::bit_cast<std::uint64_t>(value >> (state.r[2] & 63U));
+                state.r[0] = static_cast<std::uint32_t>(shifted);
+                state.r[1] = static_cast<std::uint32_t>(shifted >> 32U);
+                return GuestHookResult{};
+            })
             || !bind("__aeabi_fadd", [](GuestCpuState32& state, GuestMemory&) {
                 const auto result = std::bit_cast<float>(state.r[0]) + std::bit_cast<float>(state.r[1]);
                 state.r[0] = std::bit_cast<std::uint32_t>(result);
