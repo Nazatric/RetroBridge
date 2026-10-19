@@ -120,7 +120,7 @@ class GuestPreferences internal constructor(private val file: Path) {
             throw SecurityException("Guest preferences are not a regular app-private file")
         }
         if (Files.size(file) > MAX_FILE_BYTES) throw IOException("Guest preferences exceed the file-size limit")
-        return Files.newInputStream(file).use { stream ->
+        return Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS).use { stream ->
             DataInputStream(stream).use { input ->
                 if (input.readInt() != MAGIC || input.readInt() != FORMAT_VERSION) {
                     throw IOException("Guest preferences have an unsupported file format")
@@ -216,7 +216,12 @@ class GuestPreferences internal constructor(private val file: Path) {
 
         val temporary = Files.createTempFile(parent, ".guest-preferences-", ".tmp")
         try {
-            Files.write(temporary, bytes, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE)
+            Files.newOutputStream(
+                temporary,
+                StandardOpenOption.TRUNCATE_EXISTING,
+                StandardOpenOption.WRITE,
+                LinkOption.NOFOLLOW_LINKS,
+            ).use { it.write(bytes) }
             if (Files.isSymbolicLink(file)) throw SecurityException("Guest preferences cannot be a symbolic link")
             try {
                 Files.move(temporary, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)

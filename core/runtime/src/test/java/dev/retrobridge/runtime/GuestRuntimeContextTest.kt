@@ -91,6 +91,38 @@ class GuestRuntimeContextTest {
     }
 
     @Test
+    fun privateFileOperationsRejectSymlinkedTargets() {
+        val fixture = newGuestFixture()
+        val context = GuestRuntimeContextFactory.create(fixture.privateRoot, fixture.request)
+        val wrapper = GuestContextWrapper(context)
+        val outside = Files.createTempFile("retrobridge-private-file-outside", ".txt")
+        Files.writeString(outside, "host-owned")
+        val symlink = wrapper.filesDir.resolve("linked.txt")
+        try {
+            Files.createSymbolicLink(symlink, outside)
+        } catch (_: UnsupportedOperationException) {
+            Files.deleteIfExists(outside)
+            return
+        } catch (_: java.io.IOException) {
+            Files.deleteIfExists(outside)
+            return
+        } catch (_: SecurityException) {
+            Files.deleteIfExists(outside)
+            return
+        }
+        try {
+            assertThrows(SecurityException::class.java) { wrapper.openFileInput("linked.txt") }
+            assertThrows(SecurityException::class.java) {
+                wrapper.openFileOutput("linked.txt").use { it.write("guest-overwrite".toByteArray()) }
+            }
+            assertEquals("host-owned", Files.readString(outside))
+        } finally {
+            Files.deleteIfExists(symlink)
+            Files.deleteIfExists(outside)
+        }
+    }
+
+    @Test
     fun preferencesRejectCorruptOrSymlinkedFiles() {
         val fixture = newGuestFixture()
         val context = GuestRuntimeContextFactory.create(fixture.privateRoot, fixture.request)

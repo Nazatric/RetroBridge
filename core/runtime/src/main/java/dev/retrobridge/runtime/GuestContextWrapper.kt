@@ -68,16 +68,28 @@ class GuestContextWrapper(private val context: GuestRuntimeContext) {
         if (Files.isSymbolicLink(file) || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
             throw IOException("Guest private file is missing or is not a regular file")
         }
-        return Files.newInputStream(file)
+        return Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)
     }
 
     fun openFileOutput(name: String, append: Boolean = false): OutputStream {
         val file = resolvePrivateFile(name)
         if (Files.isSymbolicLink(file)) throw SecurityException("Guest private files cannot be symbolic links")
         return if (append) {
-            Files.newOutputStream(file, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND)
+            Files.newOutputStream(
+                file,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.WRITE,
+                StandardOpenOption.APPEND,
+                LinkOption.NOFOLLOW_LINKS,
+            )
         } else {
-            Files.newOutputStream(file, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)
+            Files.newOutputStream(
+                file,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.WRITE,
+                StandardOpenOption.TRUNCATE_EXISTING,
+                LinkOption.NOFOLLOW_LINKS,
+            )
         }
     }
 
