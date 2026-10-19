@@ -795,6 +795,8 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
                 && thunks.resolve_symbol("memchr").has_value() && thunks.resolve_symbol("memrchr").has_value()
                 && thunks.resolve_symbol("strnlen").has_value()
                 && thunks.resolve_symbol("strchr").has_value() && thunks.resolve_symbol("strrchr").has_value()
+                && thunks.resolve_symbol("strstr").has_value() && thunks.resolve_symbol("strpbrk").has_value()
+                && thunks.resolve_symbol("strspn").has_value() && thunks.resolve_symbol("strcspn").has_value()
                 && thunks.resolve_symbol("__aeabi_lmul").has_value()
                 && thunks.resolve_symbol("__aeabi_llsl").has_value()
                 && thunks.resolve_symbol("__aeabi_llsr").has_value()
@@ -911,7 +913,12 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
         check(write_guest_string(kGuestData + 0x200U, "guest")
                 && write_guest_string(kGuestData + 0x220U, "guest")
                 && write_guest_string(kGuestData + 0x240U, "guest!")
-                && write_guest_string(kGuestData + 0x2a0U, "letter"),
+                && write_guest_string(kGuestData + 0x260U, "est")
+                && write_guest_string(kGuestData + 0x270U, "xst")
+                && write_guest_string(kGuestData + 0x290U, "gue")
+                && write_guest_string(kGuestData + 0x2a0U, "letter")
+                && write_guest_string(kGuestData + 0x2b0U, "t")
+                && write_guest_string(kGuestData + 0x2d0U, ""),
             "Bionic string fixtures are staged in guest memory");
         state = {};
         state.r[0] = kGuestData + 0x200U;
@@ -952,6 +959,28 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
         auto [strrchr_missing_state, strrchr_missing_result] = invoke("strrchr", state);
         check(strrchr_missing_result.status == ExecutionStatus::Completed && strrchr_missing_state.r[0] == 0,
             "guest strrchr returns null when a byte is absent");
+        state = {};
+        state.r[0] = kGuestData + 0x200U;
+        state.r[1] = kGuestData + 0x260U;
+        auto [strstr_state, strstr_result] = invoke("strstr", state);
+        check(strstr_result.status == ExecutionStatus::Completed && strstr_state.r[0] == kGuestData + 0x202U,
+            "guest strstr returns the first matching substring address");
+        state.r[1] = kGuestData + 0x2d0U;
+        auto [strstr_empty_state, strstr_empty_result] = invoke("strstr", state);
+        check(strstr_empty_result.status == ExecutionStatus::Completed && strstr_empty_state.r[0] == kGuestData + 0x200U,
+            "guest strstr returns the haystack for an empty needle");
+        state.r[1] = kGuestData + 0x270U;
+        auto [strpbrk_state, strpbrk_result] = invoke("strpbrk", state);
+        check(strpbrk_result.status == ExecutionStatus::Completed && strpbrk_state.r[0] == kGuestData + 0x203U,
+            "guest strpbrk returns the first byte present in the accept set");
+        state.r[1] = kGuestData + 0x290U;
+        auto [strspn_state, strspn_result] = invoke("strspn", state);
+        check(strspn_result.status == ExecutionStatus::Completed && strspn_state.r[0] == 3U,
+            "guest strspn counts the accepted prefix");
+        state.r[1] = kGuestData + 0x2b0U;
+        auto [strcspn_state, strcspn_result] = invoke("strcspn", state);
+        check(strcspn_result.status == ExecutionStatus::Completed && strcspn_state.r[0] == 4U,
+            "guest strcspn counts the prefix before a rejected byte");
         state = {};
         state.r[0] = kGuestData + 0x200U;
         state.r[1] = 3U;

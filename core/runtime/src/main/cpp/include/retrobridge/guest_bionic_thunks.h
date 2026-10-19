@@ -60,6 +60,8 @@ private:
     [[nodiscard]] GuestHookResult string_length(GuestCpuState32& state);
     [[nodiscard]] GuestHookResult bounded_string_length(GuestCpuState32& state);
     [[nodiscard]] GuestHookResult find_string_character(GuestCpuState32& state, bool reverse);
+    [[nodiscard]] GuestHookResult find_string_substring(GuestCpuState32& state, bool character_set);
+    [[nodiscard]] GuestHookResult string_span(GuestCpuState32& state, bool reject_set);
     [[nodiscard]] GuestHookResult string_compare(GuestCpuState32& state, bool bounded);
     [[nodiscard]] GuestHookResult string_copy(GuestCpuState32& state, bool bounded);
     [[nodiscard]] GuestHookResult string_duplicate(GuestCpuState32& state);

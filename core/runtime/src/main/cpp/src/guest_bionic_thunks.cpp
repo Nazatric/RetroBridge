@@ -173,6 +173,10 @@ bool GuestBionicThunks::install(std::string* diagnostic) {
             || !bind("strnlen", [this](GuestCpuState32& state, GuestMemory&) { return bounded_string_length(state); })
             || !bind("strchr", [this](GuestCpuState32& state, GuestMemory&) { return find_string_character(state, false); })
             || !bind("strrchr", [this](GuestCpuState32& state, GuestMemory&) { return find_string_character(state, true); })
+            || !bind("strstr", [this](GuestCpuState32& state, GuestMemory&) { return find_string_substring(state, false); })
+            || !bind("strpbrk", [this](GuestCpuState32& state, GuestMemory&) { return find_string_substring(state, true); })
+            || !bind("strspn", [this](GuestCpuState32& state, GuestMemory&) { return string_span(state, false); })
+            || !bind("strcspn", [this](GuestCpuState32& state, GuestMemory&) { return string_span(state, true); })
             || !bind("strcmp", [this](GuestCpuState32& state, GuestMemory&) { return string_compare(state, false); })
             || !bind("strncmp", [this](GuestCpuState32& state, GuestMemory&) { return string_compare(state, true); })
             || !bind("strcpy", [this](GuestCpuState32& state, GuestMemory&) { return string_copy(state, false); })
@@ -976,6 +980,38 @@ GuestHookResult GuestBionicThunks::find_string_character(GuestCpuState32& state,
     const auto result = static_cast<std::uint64_t>(state.r[0]) + *offset;
     state.r[0] = result <= std::numeric_limits<std::uint32_t>::max()
         ? static_cast<std::uint32_t>(result) : 0U;
+    return {};
+}
+
+GuestHookResult GuestBionicThunks::find_string_substring(GuestCpuState32& state, bool character_set) {
+    const auto text = read_c_string(state.r[0], kMaxStringOperation);
+    const auto pattern = read_c_string(state.r[1], kMaxStringOperation);
+    if (!text.has_value() || !pattern.has_value()) {
+        set_errno(EFAULT);
+        state.r[0] = 0;
+        return {};
+    }
+    const auto offset = character_set ? text->find_first_of(*pattern) : text->find(*pattern);
+    if (offset == std::string::npos) {
+        state.r[0] = 0;
+        return {};
+    }
+    const auto result = static_cast<std::uint64_t>(state.r[0]) + offset;
+    state.r[0] = result <= std::numeric_limits<std::uint32_t>::max()
+        ? static_cast<std::uint32_t>(result) : 0U;
+    return {};
+}
+
+GuestHookResult GuestBionicThunks::string_span(GuestCpuState32& state, bool reject_set) {
+    const auto text = read_c_string(state.r[0], kMaxStringOperation);
+    const auto set = read_c_string(state.r[1], kMaxStringOperation);
+    if (!text.has_value() || !set.has_value()) {
+        set_errno(EFAULT);
+        state.r[0] = 0;
+        return {};
+    }
+    const auto boundary = reject_set ? text->find_first_of(*set) : text->find_first_not_of(*set);
+    state.r[0] = static_cast<std::uint32_t>(boundary == std::string::npos ? text->size() : boundary);
     return {};
 }
 
