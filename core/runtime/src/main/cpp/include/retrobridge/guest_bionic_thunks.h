@@ -71,6 +71,7 @@ private:
     [[nodiscard]] GuestHookResult file_write(GuestCpuState32& state);
     [[nodiscard]] GuestHookResult file_pread(GuestCpuState32& state);
     [[nodiscard]] GuestHookResult file_pwrite(GuestCpuState32& state);
+    [[nodiscard]] GuestHookResult file_sync(GuestCpuState32& state, bool data_only);
     [[nodiscard]] GuestHookResult file_seek(GuestCpuState32& state);
     [[nodiscard]] GuestHookResult file_seek64(GuestCpuState32& state);
     [[nodiscard]] GuestHookResult file_stat64(GuestCpuState32& state, bool no_follow);

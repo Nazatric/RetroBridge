@@ -519,6 +519,8 @@ void test_native_vfs_io_and_descriptors() {
         check(vfs.seek(fd, 0, SEEK_CUR) == 5 && vfs.pwrite(fd, replacement, 1) == 1
                 && vfs.seek(fd, 0, SEEK_CUR) == 5,
             "positioned writes update a file without changing the shared file position");
+        check(vfs.synchronize(fd, false) == 0 && vfs.synchronize(fd, true) == 0,
+            "file and data-only synchronization operate on guest descriptors");
         check(vfs.seek(fd, 0, SEEK_SET) == 0, "guest lseek updates the virtual descriptor position");
         std::array<std::byte, 8> readback{};
         check(vfs.read(fd, readback) == 5 && readback[0] == std::byte{'h'} && readback[1] == std::byte{'A'}
@@ -813,6 +815,7 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
                 && thunks.resolve_symbol("sqrtf").has_value() && thunks.resolve_symbol("mkdir").has_value()
                 && thunks.resolve_symbol("rename").has_value() && thunks.resolve_symbol("getdents64").has_value()
                 && thunks.resolve_symbol("pread").has_value() && thunks.resolve_symbol("pwrite").has_value()
+                && thunks.resolve_symbol("fsync").has_value() && thunks.resolve_symbol("fdatasync").has_value()
                 && thunks.resolve_symbol("openat").has_value() && thunks.resolve_symbol("mkdirat").has_value()
                 && thunks.resolve_symbol("unlinkat").has_value() && thunks.resolve_symbol("renameat").has_value()
                 && thunks.resolve_symbol("faccessat").has_value() && thunks.resolve_symbol("fstatat64").has_value()
@@ -1232,6 +1235,13 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
             auto [positioned_seek_state, positioned_seek_result] = invoke("lseek", state);
             check(positioned_seek_result.status == ExecutionStatus::Completed && positioned_seek_state.r[0] == file_bytes.size(),
                 "guest pread and pwrite preserve the shared descriptor position");
+            state = {};
+            state.r[0] = static_cast<std::uint32_t>(guest_fd);
+            auto [fsync_state, fsync_result] = invoke("fsync", state);
+            auto [fdatasync_state, fdatasync_result] = invoke("fdatasync", state);
+            check(fsync_result.status == ExecutionStatus::Completed && fsync_state.r[0] == 0
+                    && fdatasync_result.status == ExecutionStatus::Completed && fdatasync_state.r[0] == 0,
+                "guest libc fsync and fdatasync flush only valid VFS descriptors");
 
             constexpr auto guest_stat_address = kGuestData + 0xa80U;
             state = {};

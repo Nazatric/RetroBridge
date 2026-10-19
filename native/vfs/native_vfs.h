@@ -33,6 +33,7 @@ public:
     [[nodiscard]] long write(int guest_fd, std::span<const std::byte> input) noexcept;
     [[nodiscard]] long pread(int guest_fd, std::span<std::byte> output, long long offset) noexcept;
     [[nodiscard]] long pwrite(int guest_fd, std::span<const std::byte> input, long long offset) noexcept;
+    [[nodiscard]] int synchronize(int guest_fd, bool data_only) noexcept;
     [[nodiscard]] long long seek(int guest_fd, long long offset, int whence) noexcept;
     [[nodiscard]] int fstat(int guest_fd, struct stat* output) noexcept;
     [[nodiscard]] int stat_path(std::string_view guest_path, struct stat* output, bool no_follow = true);

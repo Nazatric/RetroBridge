@@ -196,6 +196,8 @@ bool GuestBionicThunks::install(std::string* diagnostic) {
             || !bind("write", [this](GuestCpuState32& state, GuestMemory&) { return file_write(state); })
             || !bind("pread", [this](GuestCpuState32& state, GuestMemory&) { return file_pread(state); })
             || !bind("pwrite", [this](GuestCpuState32& state, GuestMemory&) { return file_pwrite(state); })
+            || !bind("fsync", [this](GuestCpuState32& state, GuestMemory&) { return file_sync(state, false); })
+            || !bind("fdatasync", [this](GuestCpuState32& state, GuestMemory&) { return file_sync(state, true); })
             || !bind("lseek", [this](GuestCpuState32& state, GuestMemory&) { return file_seek(state); })
             || !bind("lseek64", [this](GuestCpuState32& state, GuestMemory&) { return file_seek64(state); })
             || !bind("stat64", [this](GuestCpuState32& state, GuestMemory&) { return file_stat64(state, false); })
@@ -1253,6 +1255,18 @@ GuestHookResult GuestBionicThunks::file_pwrite(GuestCpuState32& state) {
     const auto result = vfs_->pwrite(as_i32(state.r[0]), bytes, as_i32(state.r[3]));
     if (result < 0) set_errno(errno);
     state.r[0] = as_u32(static_cast<std::int32_t>(result));
+    return {};
+}
+
+GuestHookResult GuestBionicThunks::file_sync(GuestCpuState32& state, bool data_only) {
+    if (vfs_ == nullptr) {
+        set_errno(ENOSYS);
+        state.r[0] = as_u32(-1);
+        return {};
+    }
+    const auto result = vfs_->synchronize(as_i32(state.r[0]), data_only);
+    if (result != 0) set_errno(errno);
+    state.r[0] = as_u32(result);
     return {};
 }
 

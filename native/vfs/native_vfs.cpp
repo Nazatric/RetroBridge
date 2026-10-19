@@ -159,6 +159,16 @@ long NativeVfs::pwrite(int guest_fd, std::span<const std::byte> input, long long
     return static_cast<long>(::pwrite(descriptor->host_fd, input.data(), input.size(), static_cast<off_t>(offset)));
 }
 
+int NativeVfs::synchronize(int guest_fd, bool data_only) noexcept {
+    std::lock_guard lock(mutex_);
+    const auto* descriptor = find_descriptor_locked(guest_fd);
+    if (descriptor == nullptr) {
+        errno = EBADF;
+        return -1;
+    }
+    return data_only ? ::fdatasync(descriptor->host_fd) : ::fsync(descriptor->host_fd);
+}
+
 long long NativeVfs::seek(int guest_fd, long long offset, int whence) noexcept {
     std::lock_guard lock(mutex_);
     const auto* descriptor = find_descriptor_locked(guest_fd);
