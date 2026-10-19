@@ -96,7 +96,7 @@ class GuestRuntimeContextTest {
         val context = GuestRuntimeContextFactory.create(fixture.privateRoot, fixture.request)
         val wrapper = GuestContextWrapper(context)
         val outside = Files.createTempFile("retrobridge-private-file-outside", ".txt")
-        Files.writeString(outside, "host-owned")
+        Files.write(outside, "host-owned".toByteArray())
         val symlink = wrapper.filesDir.resolve("linked.txt")
         try {
             Files.createSymbolicLink(symlink, outside)
@@ -115,7 +115,7 @@ class GuestRuntimeContextTest {
             assertThrows(SecurityException::class.java) {
                 wrapper.openFileOutput("linked.txt").use { it.write("guest-overwrite".toByteArray()) }
             }
-            assertEquals("host-owned", Files.readString(outside))
+            assertEquals("host-owned", String(Files.readAllBytes(outside), Charsets.UTF_8))
         } finally {
             Files.deleteIfExists(symlink)
             Files.deleteIfExists(outside)
