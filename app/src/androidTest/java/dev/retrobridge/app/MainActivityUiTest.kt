@@ -19,6 +19,7 @@ class MainActivityUiTest {
     @Test
     fun appListDescribesBoundedNativeSupportAndOffersApkImport() {
         composeRule.onNodeWithText("Selected ARM32 native execution only").assertIsDisplayed()
+        composeRule.onNodeWithText("Not all armeabi-v7a games are compatible.").assertIsDisplayed()
         composeRule.onNodeWithText("Import APK").assertIsDisplayed().assertHasClickAction()
         composeRule.onAllNodesWithText("Guest APK launch is not implemented").assertCountEquals(0)
     }

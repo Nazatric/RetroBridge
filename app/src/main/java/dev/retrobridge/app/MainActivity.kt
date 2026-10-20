@@ -424,7 +424,7 @@ private fun AppListScreen(
         Text("ARM32 compatibility runtime · experimental prototype", style = MaterialTheme.typography.bodyMedium)
         WarningCard(
             title = "Selected ARM32 native execution only",
-            body = "RetroBridge can load and interpret selected ARM32 native libraries and entrypoints. It does not run APK Java/DEX, launch Android Activities, or virtualize the full framework. Passing APK preflight is not a load or launch guarantee; unsupported dependencies and APIs fail with diagnostics.",
+            body = "Not all armeabi-v7a games are compatible. RetroBridge executes only selected ARM32 native libraries and entrypoints; it does not run APK Java/DEX, launch Android Activities, or virtualize the full framework. ABI detection and APK preflight are not launch guarantees; unsupported instructions, dependencies, syscalls, and APIs fail with diagnostics.",
         )
         if (registryProblem != null) {
             WarningCard("Registry could not be opened", registryProblem)
