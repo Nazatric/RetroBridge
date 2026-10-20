@@ -97,6 +97,11 @@ class MainActivity : ComponentActivity() {
                 var storageRefresh by remember { mutableIntStateOf(0) }
                 val selected = apps.firstOrNull { it.id == selectedId }
 
+                suspend fun showOperationResult(message: String) {
+                    operationBusy = false
+                    snackbarHostState.showSnackbar(message)
+                }
+
                 LaunchedEffect(selected?.id, storageRefresh) {
                     storage = null
                     if (selected != null && importer != null) {
@@ -124,11 +129,11 @@ class MainActivity : ComponentActivity() {
                                 apps.removeAll { it.id == imported.id }
                                 apps.add(0, imported)
                                 selectedId = imported.id
-                                snackbarHostState.showSnackbar("Imported ${imported.displayName}. Launch will attempt bounded ARM32 native execution when supported libraries are present.")
+                                showOperationResult("Imported ${imported.displayName}. Launch will attempt bounded ARM32 native execution when supported libraries are present.")
                             } catch (cancelled: CancellationException) {
                                 throw cancelled
                             } catch (failure: Exception) {
-                                snackbarHostState.showSnackbar("Import failed: ${failure.message ?: "unknown error"}")
+                                showOperationResult("Import failed: ${failure.message ?: "unknown error"}")
                             } finally {
                                 operationBusy = false
                             }
@@ -149,16 +154,16 @@ class MainActivity : ComponentActivity() {
                             val result = runtimeClient.launchGuestRuntime(target)
                             runtimeSessions[target.id] = RuntimeSessionUi.from(result)
                             if (result.state != GuestRuntimeProtocol.STATE_RUNNING || result.sessionId == null) {
-                                snackbarHostState.showSnackbar("Guest runtime did not launch: ${result.diagnostic}")
+                                showOperationResult("Guest runtime did not launch: ${result.diagnostic}")
                             } else {
-                                snackbarHostState.showSnackbar(
+                                showOperationResult(
                                     "ARM32 native code executed: ${result.guestInstructions} instructions across ${result.loadedLibraries.size} library/libraries.",
                                 )
                             }
                         } catch (cancelled: CancellationException) {
                             throw cancelled
                         } catch (failure: Exception) {
-                            snackbarHostState.showSnackbar("Guest runtime launch failed: ${failure.message ?: "unknown error"}")
+                            showOperationResult("Guest runtime launch failed: ${failure.message ?: "unknown error"}")
                         } finally {
                             operationBusy = false
                         }
@@ -178,11 +183,11 @@ class MainActivity : ComponentActivity() {
                             ) {
                                 runtimeSessions.remove(target.id)
                             }
-                            snackbarHostState.showSnackbar(result.diagnostic)
+                            showOperationResult(result.diagnostic)
                         } catch (cancelled: CancellationException) {
                             throw cancelled
                         } catch (failure: Exception) {
-                            snackbarHostState.showSnackbar("Runtime stop failed: ${failure.message ?: "unknown error"}")
+                            showOperationResult("Runtime stop failed: ${failure.message ?: "unknown error"}")
                         } finally {
                             operationBusy = false
                         }
@@ -212,13 +217,13 @@ class MainActivity : ComponentActivity() {
                                 }
                                 replaceRecord(updated)
                                 storageRefresh += 1
-                                snackbarHostState.showSnackbar(
+                                showOperationResult(
                                     "Imported ${result.filesImported} data files (${formatBytes(result.uncompressedBytes)}).",
                                 )
                             } catch (cancelled: CancellationException) {
                                 throw cancelled
                             } catch (failure: Exception) {
-                                snackbarHostState.showSnackbar("Data ZIP import failed: ${failure.message ?: "unknown error"}")
+                                showOperationResult("Data ZIP import failed: ${failure.message ?: "unknown error"}")
                             } finally {
                                 operationBusy = false
                             }
@@ -250,13 +255,13 @@ class MainActivity : ComponentActivity() {
                                 }
                                 replaceRecord(updated)
                                 storageRefresh += 1
-                                snackbarHostState.showSnackbar(
+                                showOperationResult(
                                     "Imported ${result.paths.size} OBB file(s) (${formatBytes(result.bytesImported)}).",
                                 )
                             } catch (cancelled: CancellationException) {
                                 throw cancelled
                             } catch (failure: Exception) {
-                                snackbarHostState.showSnackbar("OBB import failed: ${failure.message ?: "unknown error"}")
+                                showOperationResult("OBB import failed: ${failure.message ?: "unknown error"}")
                             } finally {
                                 operationBusy = false
                             }
@@ -279,13 +284,13 @@ class MainActivity : ComponentActivity() {
                                         ?: error("Unable to create the destination ZIP")
                                     output.use { manager.exportGuestData(target, it) }
                                 }
-                                snackbarHostState.showSnackbar(
+                                showOperationResult(
                                     "Exported ${result.filesExported} files (${formatBytes(result.bytesExported)}).",
                                 )
                             } catch (cancelled: CancellationException) {
                                 throw cancelled
                             } catch (failure: Exception) {
-                                snackbarHostState.showSnackbar("Export failed: ${failure.message ?: "unknown error"}")
+                                showOperationResult("Export failed: ${failure.message ?: "unknown error"}")
                             } finally {
                                 operationBusy = false
                             }
@@ -341,11 +346,11 @@ class MainActivity : ComponentActivity() {
                                                 importer?.clearData(selected) ?: error("Registry is unavailable")
                                             }
                                             storageRefresh += 1
-                                            snackbarHostState.showSnackbar("Cleared guest-owned data. The imported APK and OBB files were retained.")
+                                            showOperationResult("Cleared guest-owned data. The imported APK and OBB files were retained.")
                                         } catch (cancelled: CancellationException) {
                                             throw cancelled
                                         } catch (failure: Exception) {
-                                            snackbarHostState.showSnackbar("Clear Data failed: ${failure.message ?: "unknown error"}")
+                                            showOperationResult("Clear Data failed: ${failure.message ?: "unknown error"}")
                                         } finally {
                                             operationBusy = false
                                         }
@@ -364,11 +369,11 @@ class MainActivity : ComponentActivity() {
                                             apps.removeAll { it.id == selected.id }
                                             selectedId = null
                                             storage = null
-                                            snackbarHostState.showSnackbar("Removed ${selected.displayName} from RetroBridge.")
+                                            showOperationResult("Removed ${selected.displayName} from RetroBridge.")
                                         } catch (cancelled: CancellationException) {
                                             throw cancelled
                                         } catch (failure: Exception) {
-                                            snackbarHostState.showSnackbar("Remove failed: ${failure.message ?: "unknown error"}")
+                                            showOperationResult("Remove failed: ${failure.message ?: "unknown error"}")
                                         } finally {
                                             operationBusy = false
                                         }
