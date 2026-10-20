@@ -16,12 +16,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -40,8 +42,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import dev.retrobridge.fs.StorageBreakdown
@@ -50,6 +54,7 @@ import dev.retrobridge.services.Capability
 import dev.retrobridge.services.CapabilityStatus
 import dev.retrobridge.services.CompatibilityReport
 import dev.retrobridge.runtime.GuestRuntimeProtocol
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -86,7 +91,7 @@ class MainActivity : ComponentActivity() {
                 val snackbarHostState = remember { SnackbarHostState() }
                 val scope = rememberCoroutineScope()
                 val runtimeSessions = remember { mutableStateMapOf<String, RuntimeSessionUi>() }
-                var runtimeBusy by remember { mutableStateOf(false) }
+                var operationBusy by remember { mutableStateOf(false) }
                 var selectedId by remember { mutableStateOf<String?>(null) }
                 var storage by remember { mutableStateOf<StorageBreakdown?>(null) }
                 var storageRefresh by remember { mutableIntStateOf(0) }
@@ -95,16 +100,21 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(selected?.id, storageRefresh) {
                     storage = null
                     if (selected != null && importer != null) {
-                        storage = runCatching {
+                        storage = try {
                             withContext(Dispatchers.IO) { importer.storageBreakdown(selected) }
-                        }.getOrNull()
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            null
+                        }
                     }
                 }
 
                 val apkPicker = rememberLauncherForActivityResult(
                     ActivityResultContracts.OpenDocument(),
                 ) { uri: Uri? ->
-                    if (uri != null) {
+                    if (uri != null && !operationBusy) {
+                        operationBusy = true
                         scope.launch {
                             try {
                                 val imported = withContext(Dispatchers.IO) {
@@ -115,8 +125,12 @@ class MainActivity : ComponentActivity() {
                                 apps.add(0, imported)
                                 selectedId = imported.id
                                 snackbarHostState.showSnackbar("Imported ${imported.displayName}. Launch will attempt bounded ARM32 native execution when supported libraries are present.")
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
                             } catch (failure: Exception) {
                                 snackbarHostState.showSnackbar("Import failed: ${failure.message ?: "unknown error"}")
+                            } finally {
+                                operationBusy = false
                             }
                         }
                     }
@@ -128,8 +142,8 @@ class MainActivity : ComponentActivity() {
                 }
 
                 fun startRuntimeSession(target: GuestAppRecord) {
-                    if (runtimeBusy || runtimeSessions[target.id]?.sessionId != null) return
-                    runtimeBusy = true
+                    if (operationBusy || runtimeSessions[target.id]?.sessionId != null) return
+                    operationBusy = true
                     scope.launch {
                         try {
                             val result = runtimeClient.launchGuestRuntime(target)
@@ -141,10 +155,12 @@ class MainActivity : ComponentActivity() {
                                     "ARM32 native code executed: ${result.guestInstructions} instructions across ${result.loadedLibraries.size} library/libraries.",
                                 )
                             }
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
                         } catch (failure: Exception) {
                             snackbarHostState.showSnackbar("Guest runtime launch failed: ${failure.message ?: "unknown error"}")
                         } finally {
-                            runtimeBusy = false
+                            operationBusy = false
                         }
                     }
                 }
@@ -152,8 +168,8 @@ class MainActivity : ComponentActivity() {
                 fun stopRuntimeSession(target: GuestAppRecord) {
                     val current = runtimeSessions[target.id] ?: return
                     val sessionId = current.sessionId ?: return
-                    if (runtimeBusy) return
-                    runtimeBusy = true
+                    if (operationBusy) return
+                    operationBusy = true
                     scope.launch {
                         try {
                             val result = runtimeClient.stopSession(sessionId)
@@ -163,17 +179,19 @@ class MainActivity : ComponentActivity() {
                                 runtimeSessions.remove(target.id)
                             }
                             snackbarHostState.showSnackbar(result.diagnostic)
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
                         } catch (failure: Exception) {
                             snackbarHostState.showSnackbar("Runtime stop failed: ${failure.message ?: "unknown error"}")
                         } finally {
-                            runtimeBusy = false
+                            operationBusy = false
                         }
                     }
                 }
 
                 suspend fun stopRuntimeSessionBeforeStorageChange(target: GuestAppRecord) {
                     val current = runtimeSessions[target.id] ?: return
-                    current.sessionId?.let { sessionId -> runCatching { runtimeClient.stopSession(sessionId) } }
+                    stopRuntimeSessionForStorageChange(current.sessionId, current.state, runtimeClient::stopSession)
                     runtimeSessions.remove(target.id)
                 }
 
@@ -181,9 +199,11 @@ class MainActivity : ComponentActivity() {
                     ActivityResultContracts.OpenDocument(),
                 ) { uri: Uri? ->
                     val target = apps.firstOrNull { it.id == selectedId }
-                    if (uri != null && target != null) {
+                    if (uri != null && target != null && !operationBusy) {
+                        operationBusy = true
                         scope.launch {
                             try {
+                                stopRuntimeSessionBeforeStorageChange(target)
                                 val manager = importer ?: error("Registry is unavailable")
                                 val (updated, result) = withContext(Dispatchers.IO) {
                                     val input = contentResolver.openInputStream(uri)
@@ -195,8 +215,12 @@ class MainActivity : ComponentActivity() {
                                 snackbarHostState.showSnackbar(
                                     "Imported ${result.filesImported} data files (${formatBytes(result.uncompressedBytes)}).",
                                 )
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
                             } catch (failure: Exception) {
                                 snackbarHostState.showSnackbar("Data ZIP import failed: ${failure.message ?: "unknown error"}")
+                            } finally {
+                                operationBusy = false
                             }
                         }
                     }
@@ -206,9 +230,11 @@ class MainActivity : ComponentActivity() {
                     ActivityResultContracts.OpenDocument(),
                 ) { uri: Uri? ->
                     val target = apps.firstOrNull { it.id == selectedId }
-                    if (uri != null && target != null) {
+                    if (uri != null && target != null && !operationBusy) {
+                        operationBusy = true
                         scope.launch {
                             try {
+                                stopRuntimeSessionBeforeStorageChange(target)
                                 val manager = importer ?: error("Registry is unavailable")
                                 val (updated, result) = withContext(Dispatchers.IO) {
                                     val filename = queryDisplayName(uri)
@@ -227,8 +253,12 @@ class MainActivity : ComponentActivity() {
                                 snackbarHostState.showSnackbar(
                                     "Imported ${result.paths.size} OBB file(s) (${formatBytes(result.bytesImported)}).",
                                 )
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
                             } catch (failure: Exception) {
                                 snackbarHostState.showSnackbar("OBB import failed: ${failure.message ?: "unknown error"}")
+                            } finally {
+                                operationBusy = false
                             }
                         }
                     }
@@ -238,9 +268,11 @@ class MainActivity : ComponentActivity() {
                     ActivityResultContracts.CreateDocument("application/zip"),
                 ) { uri: Uri? ->
                     val target = apps.firstOrNull { it.id == selectedId }
-                    if (uri != null && target != null) {
+                    if (uri != null && target != null && !operationBusy) {
+                        operationBusy = true
                         scope.launch {
                             try {
+                                stopRuntimeSessionBeforeStorageChange(target)
                                 val manager = importer ?: error("Registry is unavailable")
                                 val result = withContext(Dispatchers.IO) {
                                     val output = contentResolver.openOutputStream(uri)
@@ -250,8 +282,12 @@ class MainActivity : ComponentActivity() {
                                 snackbarHostState.showSnackbar(
                                     "Exported ${result.filesExported} files (${formatBytes(result.bytesExported)}).",
                                 )
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
                             } catch (failure: Exception) {
                                 snackbarHostState.showSnackbar("Export failed: ${failure.message ?: "unknown error"}")
+                            } finally {
+                                operationBusy = false
                             }
                         }
                     }
@@ -263,6 +299,8 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.padding(padding),
                             apps = apps,
                             registryProblem = registryProblem,
+                            canImport = importer != null,
+                            operationBusy = operationBusy,
                             onImport = {
                                 if (importer == null) {
                                     scope.launch {
@@ -280,7 +318,7 @@ class MainActivity : ComponentActivity() {
                             record = selected,
                             storage = storage,
                             runtimeSession = runtimeSessions[selected.id],
-                            runtimeBusy = runtimeBusy,
+                            operationBusy = operationBusy,
                             onStartRuntimeSession = { startRuntimeSession(selected) },
                             onStopRuntimeSession = { stopRuntimeSession(selected) },
                             onBack = { selectedId = null },
@@ -294,32 +332,46 @@ class MainActivity : ComponentActivity() {
                                 exportPicker.launch("${selected.packageName}-retrobridge-data.zip")
                             },
                             onClearData = {
-                                scope.launch {
-                                    try {
-                                        stopRuntimeSessionBeforeStorageChange(selected)
-                                        withContext(Dispatchers.IO) {
-                                            importer?.clearData(selected) ?: error("Registry is unavailable")
+                                if (!operationBusy) {
+                                    operationBusy = true
+                                    scope.launch {
+                                        try {
+                                            stopRuntimeSessionBeforeStorageChange(selected)
+                                            withContext(Dispatchers.IO) {
+                                                importer?.clearData(selected) ?: error("Registry is unavailable")
+                                            }
+                                            storageRefresh += 1
+                                            snackbarHostState.showSnackbar("Cleared guest-owned data. The imported APK and OBB files were retained.")
+                                        } catch (cancelled: CancellationException) {
+                                            throw cancelled
+                                        } catch (failure: Exception) {
+                                            snackbarHostState.showSnackbar("Clear Data failed: ${failure.message ?: "unknown error"}")
+                                        } finally {
+                                            operationBusy = false
                                         }
-                                        storageRefresh += 1
-                                        snackbarHostState.showSnackbar("Cleared guest-owned data. The imported APK and OBB files were retained.")
-                                    } catch (failure: Exception) {
-                                        snackbarHostState.showSnackbar("Clear Data failed: ${failure.message ?: "unknown error"}")
                                     }
                                 }
                             },
                             onRemove = {
-                                scope.launch {
-                                    try {
-                                        stopRuntimeSessionBeforeStorageChange(selected)
-                                        withContext(Dispatchers.IO) {
-                                            importer?.remove(selected) ?: error("Registry is unavailable")
+                                if (!operationBusy) {
+                                    operationBusy = true
+                                    scope.launch {
+                                        try {
+                                            stopRuntimeSessionBeforeStorageChange(selected)
+                                            withContext(Dispatchers.IO) {
+                                                importer?.remove(selected) ?: error("Registry is unavailable")
+                                            }
+                                            apps.removeAll { it.id == selected.id }
+                                            selectedId = null
+                                            storage = null
+                                            snackbarHostState.showSnackbar("Removed ${selected.displayName} from RetroBridge.")
+                                        } catch (cancelled: CancellationException) {
+                                            throw cancelled
+                                        } catch (failure: Exception) {
+                                            snackbarHostState.showSnackbar("Remove failed: ${failure.message ?: "unknown error"}")
+                                        } finally {
+                                            operationBusy = false
                                         }
-                                        apps.removeAll { it.id == selected.id }
-                                        selectedId = null
-                                        storage = null
-                                        snackbarHostState.showSnackbar("Removed ${selected.displayName} from RetroBridge.")
-                                    } catch (failure: Exception) {
-                                        snackbarHostState.showSnackbar("Remove failed: ${failure.message ?: "unknown error"}")
                                     }
                                 }
                             },
@@ -354,6 +406,8 @@ private fun AppListScreen(
     modifier: Modifier,
     apps: List<GuestAppRecord>,
     registryProblem: String?,
+    canImport: Boolean,
+    operationBusy: Boolean,
     onImport: () -> Unit,
     onSelect: (GuestAppRecord) -> Unit,
 ) {
@@ -364,13 +418,18 @@ private fun AppListScreen(
         Text("RetroBridge", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Text("ARM32 compatibility runtime · experimental prototype", style = MaterialTheme.typography.bodyMedium)
         WarningCard(
-            title = "Guest APK launch is not implemented",
-            body = "APK metadata and bounded ELF structural checks are available. Host-side ARM32, heap/VFS, Bionic, and JNI primitives are partial test slices only; they are not connected to Android framework services or APK launch. Imported code is not executed.",
+            title = "Selected ARM32 native execution only",
+            body = "RetroBridge can load and interpret selected ARM32 native libraries and entrypoints. It does not run APK Java/DEX, launch Android Activities, or virtualize the full framework. Passing APK preflight is not a load or launch guarantee; unsupported dependencies and APIs fail with diagnostics.",
         )
         if (registryProblem != null) {
             WarningCard("Registry could not be opened", registryProblem)
         }
-        Button(onClick = onImport, modifier = Modifier.fillMaxWidth()) {
+        if (operationBusy) OperationProgress()
+        Button(
+            onClick = onImport,
+            enabled = canImport && !operationBusy,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
             Text("Import APK")
         }
         Text("Imported applications (${apps.size})", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
@@ -379,7 +438,11 @@ private fun AppListScreen(
         } else {
             apps.forEach { record ->
                 Card(
-                    modifier = Modifier.fillMaxWidth().clickable { onSelect(record) },
+                    modifier = Modifier.fillMaxWidth().clickable(
+                        role = Role.Button,
+                        onClickLabel = "Open ${record.displayName}",
+                        onClick = { onSelect(record) },
+                    ),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 ) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -402,7 +465,7 @@ private fun AppDetailsScreen(
     record: GuestAppRecord,
     storage: StorageBreakdown?,
     runtimeSession: RuntimeSessionUi?,
-    runtimeBusy: Boolean,
+    operationBusy: Boolean,
     onStartRuntimeSession: () -> Unit,
     onStopRuntimeSession: () -> Unit,
     onBack: () -> Unit,
@@ -477,9 +540,13 @@ private fun AppDetailsScreen(
         InfoRow("Split APKs", record.splitApkPaths.joinToString().ifBlank { "None" })
         InfoRow("Android/data archive", record.dataArchiveState.name.lowercase())
         InfoRow("OBB", "${record.obbState.name.lowercase()} · ${record.obbFiles.joinToString().ifBlank { "no files" }}")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = onAttachData) { Text("Attach data ZIP") }
-            OutlinedButton(onClick = onAttachObb) { Text("Attach OBB / ZIP") }
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onAttachData, enabled = !operationBusy, modifier = Modifier.fillMaxWidth()) {
+                Text("Attach data ZIP")
+            }
+            OutlinedButton(onClick = onAttachObb, enabled = !operationBusy, modifier = Modifier.fillMaxWidth()) {
+                Text("Attach OBB / ZIP")
+            }
         }
 
         HorizontalDivider()
@@ -521,28 +588,52 @@ private fun AppDetailsScreen(
 
         HorizontalDivider()
         Text("Runtime session controls", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (operationBusy) OperationProgress()
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
                 onClick = onStartRuntimeSession,
-                enabled = !runtimeBusy && runtimeSession?.sessionId == null,
+                enabled = !operationBusy && runtimeSession?.sessionId == null,
+                modifier = Modifier.fillMaxWidth(),
             ) { Text("Launch Guest Runtime") }
             OutlinedButton(
                 onClick = onStopRuntimeSession,
-                enabled = !runtimeBusy && runtimeSession?.sessionId != null,
+                enabled = !operationBusy && runtimeSession?.sessionId != null,
+                modifier = Modifier.fillMaxWidth(),
             ) { Text("Stop Guest Runtime") }
         }
-        OutlinedButton(onClick = onExport, modifier = Modifier.fillMaxWidth()) { Text("Export data ZIP") }
+        OutlinedButton(onClick = onExport, enabled = !operationBusy, modifier = Modifier.fillMaxWidth()) {
+            Text("Export data ZIP")
+        }
         Text(
             "Launch runs only supported ARM32 native constructors, JNI_OnLoad, and selected exported entrypoints in the bounded interpreter. " +
                 "It does not execute APK Java bytecode, start an Android Activity, or virtualize the full Android framework. " +
                 "Unsupported instructions, imports, and APIs fail with diagnostics.",
             style = MaterialTheme.typography.bodySmall,
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { pendingAction = PendingAction.CLEAR_DATA }) { Text("Clear Data") }
-            OutlinedButton(onClick = { pendingAction = PendingAction.REMOVE }) { Text("Remove") }
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = { pendingAction = PendingAction.CLEAR_DATA },
+                enabled = !operationBusy,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Clear Data") }
+            OutlinedButton(
+                onClick = { pendingAction = PendingAction.REMOVE },
+                enabled = !operationBusy,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Remove") }
         }
         Spacer(Modifier.height(12.dp))
+    }
+}
+
+@androidx.compose.runtime.Composable
+private fun OperationProgress() {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+        Text("Operation in progress…")
     }
 }
 

@@ -202,3 +202,23 @@ data class GuestRuntimeSessionReply(
     val loadedLibraries: List<String>,
     val entrypointResults: List<String>,
 )
+
+/** Fail closed before destructive storage changes unless the runtime confirms it has stopped. */
+internal suspend fun stopRuntimeSessionForStorageChange(
+    sessionId: String?,
+    runtimeState: String,
+    stopSession: suspend (String) -> GuestRuntimeSessionReply,
+) {
+    if (sessionId == null) {
+        check(runtimeState != GuestRuntimeProtocol.STATE_RUNNING) {
+            "Runtime reports an active session without a stoppable session ID"
+        }
+        return
+    }
+    val reply = stopSession(sessionId)
+    if (reply.state != GuestRuntimeProtocol.STATE_STOPPED &&
+        reply.state != GuestRuntimeProtocol.STATE_NOT_RUNNING
+    ) {
+        throw IllegalStateException(reply.diagnostic.ifBlank { "Runtime did not confirm that the session stopped" })
+    }
+}
