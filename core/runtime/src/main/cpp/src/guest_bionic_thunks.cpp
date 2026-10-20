@@ -2,6 +2,7 @@
 #include "retrobridge/arm32_stat_layout.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cerrno>
 #include <cmath>
@@ -20,6 +21,7 @@ namespace {
 
 constexpr std::size_t kMaxMemoryOperation = 16U * 1024U * 1024U;
 constexpr std::size_t kMaxStringOperation = 1U << 20U;
+constexpr std::size_t kMaximumCppGuardsInProgress = 4096U;
 constexpr std::uint32_t kPthreadInvalid = 22U;
 constexpr std::uint32_t kPthreadBusy = 16U;
 constexpr std::uint32_t kPthreadDeadlock = 35U;
@@ -101,6 +103,127 @@ bool GuestBionicThunks::install(std::string* diagnostic) {
         const auto fault_thunk = [](GuestCpuState32&, GuestMemory&) {
             return GuestHookResult{GuestHookAction::Fault, "guest called a terminating Bionic thunk"};
         };
+        const auto cpp_allocate = [this](GuestCpuState32& state, GuestMemory&) {
+            const auto address = heap_.malloc(std::max(state.r[0], 1U));
+            if (!address.has_value()) {
+                return GuestHookResult{GuestHookAction::Fault,
+                    "guest C++ operator new exhausted the bounded heap; exception unwinding is unsupported"};
+            }
+            state.r[0] = address->value();
+            return GuestHookResult{};
+        };
+        const auto cpp_allocate_nothrow = [this](GuestCpuState32& state, GuestMemory&) {
+            const auto address = heap_.malloc(std::max(state.r[0], 1U));
+            state.r[0] = address.has_value() ? address->value() : 0U;
+            return GuestHookResult{};
+        };
+        const auto cpp_allocate_aligned = [this](GuestCpuState32& state, GuestMemory&) {
+            const auto address = heap_.memalign(state.r[1], std::max(state.r[0], 1U));
+            if (!address.has_value()) {
+                return GuestHookResult{GuestHookAction::Fault,
+                    "guest aligned C++ operator new failed in the bounded heap; exception unwinding is unsupported"};
+            }
+            state.r[0] = address->value();
+            return GuestHookResult{};
+        };
+        const auto cpp_delete = [this](GuestCpuState32& state, GuestMemory&) {
+            if (state.r[0] != 0 && !heap_.free(GuestAddress32{state.r[0]})) {
+                return GuestHookResult{GuestHookAction::Fault, "guest C++ delete received an invalid guest allocation"};
+            }
+            state.r[0] = 0;
+            return GuestHookResult{};
+        };
+        const auto cxa_guard_acquire = [this](GuestCpuState32& state, GuestMemory&) {
+            const auto address = state.r[0];
+            const GuestAddress32 guard{address};
+            if ((address & 7U) != 0 || !memory_.is_accessible(
+                    guard, sizeof(std::uint64_t), GuestPermission::Read | GuestPermission::Write)) {
+                return GuestHookResult{GuestHookAction::Fault,
+                    "__cxa_guard_acquire received an invalid 64-bit guest guard"};
+            }
+            std::lock_guard lock(cpp_guard_mutex_);
+            const auto completed = memory_.read_u8(guard);
+            if (!completed.has_value()) {
+                return GuestHookResult{GuestHookAction::Fault, "__cxa_guard_acquire could not read its guest guard"};
+            }
+            if ((*completed & 1U) != 0) {
+                state.r[0] = 0;
+                return GuestHookResult{};
+            }
+            if (cpp_guards_in_progress_.contains(address)) {
+                return GuestHookResult{GuestHookAction::Fault,
+                    "recursive C++ static initialization is unsupported by the single-threaded guest runtime"};
+            }
+            if (cpp_guards_in_progress_.size() >= kMaximumCppGuardsInProgress) {
+                return GuestHookResult{GuestHookAction::Fault,
+                    "guest C++ static-initialization guard limit exceeded"};
+            }
+            try {
+                cpp_guards_in_progress_.insert(address);
+            } catch (...) {
+                return GuestHookResult{GuestHookAction::Fault,
+                    "unable to track guest C++ static initialization within the bounded runtime"};
+            }
+            state.r[0] = 1;
+            return GuestHookResult{};
+        };
+        const auto cxa_guard_release = [this](GuestCpuState32& state, GuestMemory&) {
+            const auto address = state.r[0];
+            const GuestAddress32 guard{address};
+            std::lock_guard lock(cpp_guard_mutex_);
+            if (!cpp_guards_in_progress_.contains(address)) {
+                return GuestHookResult{GuestHookAction::Fault,
+                    "__cxa_guard_release was called without a matching acquire"};
+            }
+            const auto completed = memory_.read_u8(guard);
+            if (!completed.has_value()) {
+                return GuestHookResult{GuestHookAction::Fault, "__cxa_guard_release could not read its guest guard"};
+            }
+            const std::array<std::byte, 1> value{
+                static_cast<std::byte>(static_cast<std::uint8_t>(*completed | 1U)),
+            };
+            if (!memory_.write(guard, value)) {
+                return GuestHookResult{GuestHookAction::Fault, "__cxa_guard_release could not update its guest guard"};
+            }
+            cpp_guards_in_progress_.erase(address);
+            state.r[0] = 0;
+            return GuestHookResult{};
+        };
+        const auto cxa_guard_abort = [this](GuestCpuState32& state, GuestMemory&) {
+            std::lock_guard lock(cpp_guard_mutex_);
+            if (cpp_guards_in_progress_.erase(state.r[0]) == 0) {
+                return GuestHookResult{GuestHookAction::Fault,
+                    "__cxa_guard_abort was called without a matching acquire"};
+            }
+            state.r[0] = 0;
+            return GuestHookResult{};
+        };
+
+        if (!bind("_Znwj", cpp_allocate)
+            || !bind("_Znaj", cpp_allocate)
+            || !bind("_ZnwjRKSt9nothrow_t", cpp_allocate_nothrow)
+            || !bind("_ZnajRKSt9nothrow_t", cpp_allocate_nothrow)
+            || !bind("_ZnwjSt11align_val_t", cpp_allocate_aligned)
+            || !bind("_ZnajSt11align_val_t", cpp_allocate_aligned)
+            || !bind("_ZdlPv", cpp_delete)
+            || !bind("_ZdaPv", cpp_delete)
+            || !bind("_ZdlPvj", cpp_delete)
+            || !bind("_ZdaPvj", cpp_delete)
+            || !bind("_ZdlPvSt11align_val_t", cpp_delete)
+            || !bind("_ZdaPvSt11align_val_t", cpp_delete)
+            || !bind("_ZdlPvjSt11align_val_t", cpp_delete)
+            || !bind("_ZdaPvjSt11align_val_t", cpp_delete)
+            || !bind("__cxa_guard_acquire", cxa_guard_acquire)
+            || !bind("__cxa_guard_release", cxa_guard_release)
+            || !bind("__cxa_guard_abort", cxa_guard_abort)
+            || !bind("__cxa_pure_virtual", [](GuestCpuState32&, GuestMemory&) {
+                return GuestHookResult{GuestHookAction::Fault, "guest called __cxa_pure_virtual"};
+            })
+            || !bind("__cxa_deleted_virtual", [](GuestCpuState32&, GuestMemory&) {
+                return GuestHookResult{GuestHookAction::Fault, "guest called __cxa_deleted_virtual"};
+            })) {
+            return fail("unable to register the partial C++ ABI thunk subset");
+        }
 
         if (!bind("malloc", [this](GuestCpuState32& state, GuestMemory&) {
                 const auto address = heap_.malloc(state.r[0]);
@@ -727,6 +850,10 @@ void GuestBionicThunks::shutdown() noexcept {
     data_symbols_.clear();
     errno_cell_ = GuestAddress32{0};
     stack_guard_cell_ = GuestAddress32{0};
+    {
+        std::lock_guard lock(cpp_guard_mutex_);
+        cpp_guards_in_progress_.clear();
+    }
     {
         std::lock_guard lock(pthread_table_mutex_);
         pthread_mutexes_.clear();

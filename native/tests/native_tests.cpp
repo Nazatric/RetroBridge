@@ -119,7 +119,8 @@ std::uint32_t test_gnu_hash(const std::string& name) {
     return hash;
 }
 
-std::vector<std::byte> make_loadable_arm_elf(bool include_sysv_hash = true) {
+std::vector<std::byte> make_loadable_arm_elf(
+    bool include_sysv_hash = true, std::string_view needed_library = {}) {
     std::vector<std::byte> bytes(0x1200, std::byte{0});
     bytes[0] = std::byte{0x7f};
     bytes[1] = std::byte{'E'};
@@ -160,12 +161,17 @@ std::vector<std::byte> make_loadable_arm_elf(bool include_sysv_hash = true) {
     put_u32(bytes, 140, 4);
     put_u32(bytes, 144, 4);
 
-    const std::array<std::pair<std::uint32_t, std::uint32_t>, 16> dynamic_entries{{
+    std::string strings("\0exported\0imported\0", 19);
+    if (!needed_library.empty()) {
+        strings.append(needed_library.data(), needed_library.size());
+        strings.push_back('\0');
+    }
+    const std::array<std::pair<std::uint32_t, std::uint32_t>, 17> dynamic_entries{{
         {include_sysv_hash ? 4U : 21U, 0x180}, // DT_HASH or harmless DT_DEBUG
         {0x6ffffef5U, 0x1a0},                 // DT_GNU_HASH
         {5, 0x240},                           // DT_STRTAB
         {6, 0x200},                           // DT_SYMTAB
-        {10, 19},                             // DT_STRSZ
+        {10, static_cast<std::uint32_t>(strings.size())}, // DT_STRSZ
         {11, 16},                             // DT_SYMENT
         {17, 0x280},                          // DT_REL
         {18, 24},                             // DT_RELSZ
@@ -176,6 +182,7 @@ std::vector<std::byte> make_loadable_arm_elf(bool include_sysv_hash = true) {
         {13, 0x340},                          // DT_FINI
         {26, 0x1024},                         // DT_FINI_ARRAY
         {28, 4},                              // DT_FINI_ARRAYSZ
+        {needed_library.empty() ? 21U : 1U, needed_library.empty() ? 0U : 19U}, // DT_DEBUG or DT_NEEDED
         {0, 0},                               // DT_NULL
     }};
     for (std::size_t index = 0; index < dynamic_entries.size(); ++index) {
@@ -210,7 +217,6 @@ std::vector<std::byte> make_loadable_arm_elf(bool include_sysv_hash = true) {
     put_u32(bytes, 0x220, 10);
     bytes[0x22c] = std::byte{0x12};
     put_u16(bytes, 0x22e, 0); // SHN_UNDEF
-    const std::string strings("\0exported\0imported\0", 19);
     for (std::size_t index = 0; index < strings.size(); ++index) {
         bytes[0x240 + index] = static_cast<std::byte>(static_cast<unsigned char>(strings[index]));
     }
@@ -405,6 +411,56 @@ void test_native_execution_session_runs_mapped_library_lifecycle() {
         }
     }
     std::filesystem::remove_all(root);
+}
+
+void test_native_session_accepts_only_explicit_virtual_libstdcxx_dependency() {
+    using namespace retrobridge::runtime;
+    const auto run_dependency_fixture = [](std::string_view dependency, std::string_view suffix) {
+        auto bytes = make_loadable_arm_elf(true, dependency);
+        constexpr std::string_view imported_cpp_symbol = "_Znwj";
+        std::fill(bytes.begin() + 0x24a, bytes.begin() + 0x253, std::byte{0});
+        for (std::size_t index = 0; index < imported_cpp_symbol.size(); ++index) {
+            bytes[0x24a + index] = static_cast<std::byte>(static_cast<unsigned char>(imported_cpp_symbol[index]));
+        }
+        put_u32(bytes, 0x1bc, test_gnu_hash(std::string(imported_cpp_symbol)) | 1U);
+        // Include the imported-symbol relocation plus constructor/finalizer array relocations.
+        put_u32(bytes, 0x134, 0x280);
+        put_u32(bytes, 0x13c, 24);
+
+        const auto root = std::filesystem::temp_directory_path()
+            / ("retrobridge-native-dependency-" + std::string(suffix) + "-"
+                + std::to_string(static_cast<unsigned long long>(::getpid())));
+        std::error_code error;
+        std::filesystem::remove_all(root, error);
+        error.clear();
+        std::filesystem::create_directories(root / "internal/files", error);
+        std::filesystem::create_directories(root / "external/data", error);
+        std::filesystem::create_directories(root / "obb", error);
+        std::filesystem::create_directories(root / "runtime/native", error);
+        check(!error, "native dependency fixture storage is created");
+
+        NativeExecutionReport report;
+        {
+            NativeExecutionSession session(root, "org.example.dependencyfixture");
+            std::string diagnostic;
+            check(session.initialize(&diagnostic), "native dependency fixture session initializes");
+            const auto loaded = session.load_library(bytes, "libdependency_probe.so");
+            check(loaded.loaded, "native dependency fixture maps its ARM32 image");
+            if (loaded.loaded) report = session.execute(128);
+            session.stop();
+        }
+        std::filesystem::remove_all(root, error);
+        return report;
+    };
+
+    const auto supported = run_dependency_fixture("libstdc++.so", "cpp");
+    check(supported.success && supported.relocation_count == 3,
+        "the virtual libstdc++.so dependency and imported _Znwj relocation resolve through the explicit partial C++ ABI shim");
+
+    const auto unsupported = run_dependency_fixture("libunknown_platform.so", "unknown");
+    check(!unsupported.success && !unsupported.diagnostics.empty()
+            && unsupported.diagnostics.front().find("requires unavailable library libunknown_platform.so") != std::string::npos,
+        "unknown platform dependencies still fail closed with their name in the diagnostic");
 }
 
 void test_elf_validation_and_dependencies() {
@@ -820,8 +876,24 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
                 && thunks.resolve_symbol("unlinkat").has_value() && thunks.resolve_symbol("renameat").has_value()
                 && thunks.resolve_symbol("faccessat").has_value() && thunks.resolve_symbol("fstatat64").has_value()
                 && thunks.resolve_symbol("stat64").has_value() && thunks.resolve_symbol("lstat64").has_value()
-                && thunks.resolve_symbol("fstat64").has_value() && thunks.resolve_symbol("__android_log_write").has_value(),
-            "Bionic symbol resolver exposes allocator, pthread, libm, file/directory, and logging subsets");
+                && thunks.resolve_symbol("fstat64").has_value() && thunks.resolve_symbol("__android_log_write").has_value()
+                && thunks.resolve_symbol("_Znwj").has_value() && thunks.resolve_symbol("_Znaj").has_value()
+                && thunks.resolve_symbol("_ZnwjRKSt9nothrow_t").has_value()
+                && thunks.resolve_symbol("_ZnajRKSt9nothrow_t").has_value()
+                && thunks.resolve_symbol("_ZdlPv").has_value() && thunks.resolve_symbol("_ZdaPv").has_value()
+                && thunks.resolve_symbol("_ZdlPvj").has_value() && thunks.resolve_symbol("_ZdaPvj").has_value()
+                && thunks.resolve_symbol("_ZnwjSt11align_val_t").has_value()
+                && thunks.resolve_symbol("_ZnajSt11align_val_t").has_value()
+                && thunks.resolve_symbol("_ZdlPvSt11align_val_t").has_value()
+                && thunks.resolve_symbol("_ZdaPvSt11align_val_t").has_value()
+                && thunks.resolve_symbol("_ZdlPvjSt11align_val_t").has_value()
+                && thunks.resolve_symbol("_ZdaPvjSt11align_val_t").has_value()
+                && thunks.resolve_symbol("__cxa_pure_virtual").has_value()
+                && thunks.resolve_symbol("__cxa_deleted_virtual").has_value()
+                && thunks.resolve_symbol("__cxa_guard_acquire").has_value()
+                && thunks.resolve_symbol("__cxa_guard_release").has_value()
+                && thunks.resolve_symbol("__cxa_guard_abort").has_value(),
+            "Bionic symbol resolver exposes partial libc, pthread, C++ ABI, file/directory, and logging subsets");
         check(thunks.resolve_guest_symbol("__stack_chk_guard").value_or(0U) == thunks.stack_guard_cell().value()
                 && thunks.resolve_data_symbol("errno").value_or(GuestAddress32{0}) == thunks.errno_cell(),
             "guest symbol resolver returns data-cell addresses for stack guard and errno");
@@ -889,6 +961,124 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
             state.r[0] = calloc_state.r[0];
             (void)invoke("free", state);
         }
+
+        state = {};
+        state.r[0] = 24;
+        auto [cpp_new_state, cpp_new_result] = invoke("_Znwj", state);
+        const auto cpp_allocation = cpp_new_state.r[0];
+        check(cpp_new_result.status == ExecutionStatus::Completed && cpp_allocation != 0
+                && (cpp_allocation & 7U) == 0,
+            "ARM32 C++ operator new maps to an aligned guest-heap allocation");
+        state = {};
+        state.r[0] = cpp_allocation;
+        (void)invoke("_ZdlPv", state);
+        check(cpp_allocation != 0 && !heap.free(GuestAddress32{cpp_allocation}),
+            "C++ operator delete releases the allocation through the guest heap");
+
+        state = {};
+        state.r[0] = 48;
+        auto [cpp_array_new_state, cpp_array_new_result] = invoke("_Znaj", state);
+        const auto cpp_array_allocation = cpp_array_new_state.r[0];
+        check(cpp_array_new_result.status == ExecutionStatus::Completed && cpp_array_allocation != 0,
+            "ARM32 C++ array new uses the bounded guest heap");
+        state = {};
+        state.r[0] = cpp_array_allocation;
+        (void)invoke("_ZdaPv", state);
+        check(cpp_array_allocation != 0 && !heap.free(GuestAddress32{cpp_array_allocation}),
+            "C++ array delete releases its allocation through the guest heap");
+
+        state = {};
+        state.r[0] = 1'000'000U;
+        state.r[7] = 1;
+        state.r[14] = kReturnAddress;
+        const auto new_function = thunks.resolve_symbol("_Znwj");
+        const auto throwing_new_result = interpreter.run(state, GuestAddress32{new_function.value_or(0)}, 16);
+        check(throwing_new_result.status == ExecutionStatus::GuestFault
+                && throwing_new_result.diagnostic.find("exception unwinding is unsupported") != std::string::npos,
+            "throwing C++ operator new fails explicitly when the bounded heap is exhausted");
+
+        state = {};
+        state.r[0] = 1'000'000U;
+        state.r[1] = kGuestData + 0x700U;
+        auto [nothrow_new_state, nothrow_new_result] = invoke("_ZnwjRKSt9nothrow_t", state);
+        check(nothrow_new_result.status == ExecutionStatus::Completed && nothrow_new_state.r[0] == 0,
+            "C++ nothrow operator new reports bounded-heap exhaustion as null");
+
+        state = {};
+        state.r[0] = 64;
+        state.r[1] = 32;
+        auto [aligned_new_state, aligned_new_result] = invoke("_ZnwjSt11align_val_t", state);
+        const auto aligned_cpp_allocation = aligned_new_state.r[0];
+        check(aligned_new_result.status == ExecutionStatus::Completed && aligned_cpp_allocation != 0
+                && (aligned_cpp_allocation & 31U) == 0,
+            "aligned C++ operator new honors the guest-requested alignment");
+        state = {};
+        state.r[0] = aligned_cpp_allocation;
+        state.r[1] = 32;
+        (void)invoke("_ZdlPvSt11align_val_t", state);
+        check(aligned_cpp_allocation != 0 && !heap.free(GuestAddress32{aligned_cpp_allocation}),
+            "aligned C++ delete releases its allocation through the guest heap");
+
+        constexpr std::uint32_t kGuardAddress = kGuestData + 0x500U;
+        state = {};
+        state.r[0] = kGuardAddress;
+        auto [guard_acquire_state, guard_acquire_result] = invoke("__cxa_guard_acquire", state);
+        check(guard_acquire_result.status == ExecutionStatus::Completed && guard_acquire_state.r[0] == 1,
+            "C++ local-static guard begins initialization exactly once");
+        state = {};
+        state.r[0] = kGuardAddress;
+        (void)invoke("__cxa_guard_release", state);
+        state = {};
+        state.r[0] = kGuardAddress;
+        auto [guard_complete_state, guard_complete_result] = invoke("__cxa_guard_acquire", state);
+        check(guard_complete_result.status == ExecutionStatus::Completed && guard_complete_state.r[0] == 0
+                && memory.read_u8(GuestAddress32{kGuardAddress}).value_or(0U) == 1U,
+            "released C++ local-static guard prevents duplicate initialization");
+
+        constexpr std::uint32_t kAbortedGuardAddress = kGuestData + 0x508U;
+        state = {};
+        state.r[0] = kAbortedGuardAddress;
+        auto [aborted_guard_state, aborted_guard_result] = invoke("__cxa_guard_acquire", state);
+        check(aborted_guard_result.status == ExecutionStatus::Completed && aborted_guard_state.r[0] == 1,
+            "C++ guard may begin a second independent static initialization");
+        state = {};
+        state.r[0] = kAbortedGuardAddress;
+        (void)invoke("__cxa_guard_abort", state);
+        state = {};
+        state.r[0] = kAbortedGuardAddress;
+        auto [retry_guard_state, retry_guard_result] = invoke("__cxa_guard_acquire", state);
+        check(retry_guard_result.status == ExecutionStatus::Completed && retry_guard_state.r[0] == 1,
+            "aborted C++ static initialization leaves the guard retryable");
+        state = {};
+        state.r[0] = kAbortedGuardAddress;
+        (void)invoke("__cxa_guard_release", state);
+
+        constexpr std::uint32_t kRecursiveGuardAddress = kGuestData + 0x510U;
+        const auto guard_function = thunks.resolve_symbol("__cxa_guard_acquire");
+        state = {};
+        state.r[0] = kGuardAddress + 1U;
+        state.r[7] = 1;
+        state.r[14] = kReturnAddress;
+        const auto invalid_guard = interpreter.run(state, GuestAddress32{guard_function.value_or(0)}, 16);
+        check(invalid_guard.status == ExecutionStatus::GuestFault
+                && invalid_guard.diagnostic.find("invalid 64-bit guest guard") != std::string::npos,
+            "C++ local-static guard rejects unaligned guest guard storage");
+
+        state = {};
+        state.r[0] = kRecursiveGuardAddress;
+        state.r[7] = 1;
+        state.r[14] = kReturnAddress;
+        const auto first_recursive_guard = interpreter.run(state, GuestAddress32{guard_function.value_or(0)}, 16);
+        const auto first_recursive_result = state.r[0];
+        state.r[0] = kRecursiveGuardAddress;
+        const auto recursive_guard = interpreter.run(state, GuestAddress32{guard_function.value_or(0)}, 16);
+        check(first_recursive_guard.status == ExecutionStatus::Completed && first_recursive_result == 1U
+                && recursive_guard.status == ExecutionStatus::GuestFault
+                && recursive_guard.diagnostic.find("recursive C++ static initialization") != std::string::npos,
+            "recursive C++ static initialization fails explicitly rather than double-initializing silently");
+        state = {};
+        state.r[0] = kRecursiveGuardAddress;
+        (void)invoke("__cxa_guard_abort", state);
 
         state = {};
         state.r[0] = 32;
@@ -1528,6 +1718,34 @@ void test_guest_bionic_libc_libm_and_pthread_thunks() {
         check(std::bit_cast<std::int32_t>(unsafe_open_state.r[0]) == -1
                 && memory.read_u32(thunks.errno_cell()).value_or(0U) != 0,
             "guest libc open rejects traversal and records a guest errno");
+
+        constexpr std::size_t kGuardLimit = 4096U;
+        constexpr std::uint32_t kGuardFloodBase = 0x30000U;
+        const auto guard_flood_bytes = (kGuardLimit + 1U) * sizeof(std::uint64_t);
+        check(memory.map_zeroed(GuestAddress32{kGuardFloodBase}, guard_flood_bytes,
+                GuestPermission::Read | GuestPermission::Write),
+            "bounded C++ guard-table fixture memory maps");
+        bool guards_acquired = true;
+        for (std::size_t index = 0; index < kGuardLimit; ++index) {
+            state = {};
+            state.r[0] = kGuardFloodBase + static_cast<std::uint32_t>(index * sizeof(std::uint64_t));
+            state.r[7] = 1;
+            state.r[14] = kReturnAddress;
+            const auto acquired = interpreter.run(state, GuestAddress32{guard_function.value_or(0)}, 16);
+            if (acquired.status != ExecutionStatus::Completed || state.r[0] != 1U) {
+                guards_acquired = false;
+                break;
+            }
+        }
+        check(guards_acquired, "the C++ guard table admits its documented bounded capacity");
+        state = {};
+        state.r[0] = kGuardFloodBase + static_cast<std::uint32_t>(kGuardLimit * sizeof(std::uint64_t));
+        state.r[7] = 1;
+        state.r[14] = kReturnAddress;
+        const auto excess_guard = interpreter.run(state, GuestAddress32{guard_function.value_or(0)}, 16);
+        check(excess_guard.status == ExecutionStatus::GuestFault
+                && excess_guard.diagnostic.find("guard limit exceeded") != std::string::npos,
+            "guest C++ static initialization cannot grow host guard tracking without a bound");
 
         thunks.shutdown();
         check(!thunks.installed() && !thunks.resolve_symbol("malloc").has_value(),
@@ -3716,7 +3934,7 @@ void test_capabilities_and_optional_dbt_placeholder() {
     check(retrobridge::runtime::current_capabilities().arm32_eabi_syscall_subset,
         "the implemented ARM32 EABI syscall subset is reported available");
     check(retrobridge::runtime::current_capabilities().guest_bionic_libc_libm_pthread_thunks,
-        "the explicitly partial Bionic/libc/libm/pthread thunk subset is reported available");
+        "the explicitly partial Bionic/libc/libm/pthread and C++ ABI thunk subset is reported available");
     check(!retrobridge::runtime::current_capabilities().bionic_and_guest_syscalls,
         "the partial thunk/syscall coverage is not reported as complete Bionic support");
     check(retrobridge::runtime::current_capabilities().synthetic_jni_tables_and_handle_subset,
@@ -3749,6 +3967,7 @@ int main() {
     test_guest_memory_permissions_and_bounds();
     test_elf32_loader_maps_symbols_relocations_and_constructors();
     test_native_execution_session_runs_mapped_library_lifecycle();
+    test_native_session_accepts_only_explicit_virtual_libstdcxx_dependency();
     test_elf_validation_and_dependencies();
     test_opaque_handles_and_generation();
     test_native_vfs_path_translation();

@@ -34,7 +34,7 @@ object CompatibilityReport {
         Capability(
             name = "Guest heap, VFS, and ARM EABI syscalls",
             status = CapabilityStatus.PARTIAL,
-            explanation = "The bounded runtime session wires a guest heap, guarded app-private VFS, selected Linux EABI syscalls, and partial libc/libm/pthread thunks. Unknown calls fail explicitly; there is no guest scheduler or complete Bionic surface.",
+            explanation = "The bounded runtime session wires a guest heap, guarded app-private VFS, selected Linux EABI syscalls, and partial libc/libm/pthread thunks plus guest-heap C++ new/delete and single-threaded static guards (up to 4,096 in progress). libstdc++.so is a virtual dependency backed only by explicit thunks; unresolved imports fail during relocation. There is no guest scheduler, exception unwinding, C++ atexit registry, or complete Bionic/C++ runtime surface.",
         ),
         Capability(
             name = "JNI and JavaVM",

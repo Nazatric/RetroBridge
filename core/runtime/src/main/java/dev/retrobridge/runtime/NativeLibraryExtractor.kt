@@ -42,8 +42,10 @@ object NativeLibraryExtractor {
     private const val MAX_TOTAL_LIBRARY_BYTES = 192L * 1024 * 1024
     private const val MAX_SUSPICIOUS_COMPRESSION_RATIO = 200L
 
+    // Virtual dependency names only: unresolved symbols still fail during relocation; no host DSO is loaded.
     private val platformLibraryNames = setOf(
         "libc.so",
+        "libstdc++.so",
         "libm.so",
         "libdl.so",
         "liblog.so",

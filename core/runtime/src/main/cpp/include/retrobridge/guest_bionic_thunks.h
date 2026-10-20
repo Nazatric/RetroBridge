@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -18,7 +19,7 @@
 
 namespace retrobridge::runtime {
 
-/** Explicitly partial ARM32 libc/libm/Bionic/pthread thunk table backed by guest memory. */
+/** Explicitly partial ARM32 libc/libm/Bionic/pthread/C++ ABI thunk table backed by guest memory. */
 class GuestBionicThunks final {
 public:
     GuestBionicThunks(
@@ -93,6 +94,8 @@ private:
     std::vector<GuestAddress32> trampoline_allocations_;
     std::map<std::string, std::uint32_t, std::less<>> symbols_;
     std::map<std::string, GuestAddress32, std::less<>> data_symbols_;
+    mutable std::mutex cpp_guard_mutex_;
+    std::set<std::uint32_t> cpp_guards_in_progress_;
     mutable std::mutex pthread_table_mutex_;
     std::map<std::uint32_t, std::shared_ptr<GuestMutex>> pthread_mutexes_;
     std::map<std::uint32_t, std::uint32_t> pthread_values_;

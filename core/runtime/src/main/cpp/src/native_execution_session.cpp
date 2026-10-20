@@ -15,8 +15,9 @@ namespace {
 constexpr std::uint32_t kPageSize = 0x1000U;
 constexpr std::uint64_t kMaximumInstructionBudget = 100'000'000ULL;
 constexpr const char* kReturnThunkDiagnostic = "__retrobridge_native_return__";
-constexpr std::array<std::string_view, 10> kPlatformLibraries{
-    "libc.so", "libm.so", "libdl.so", "liblog.so", "libandroid.so", "libEGL.so",
+// Names accepted without an APK-local DSO; imported symbols still need a loaded library or registered thunk.
+constexpr std::array<std::string_view, 11> kPlatformLibraries{
+    "libc.so", "libstdc++.so", "libm.so", "libdl.so", "liblog.so", "libandroid.so", "libEGL.so",
     "libGLESv1_CM.so", "libGLESv2.so", "libOpenSLES.so", "libjnigraphics.so",
 };
 
