@@ -15,6 +15,8 @@ import dev.retrobridge.manager.GuestAppState
 import dev.retrobridge.manager.GuestDiagnostic
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -26,6 +28,37 @@ private data class NativeLibraryInspection(
     val libraries: Map<String, List<String>>,
     val diagnostics: List<GuestDiagnostic>,
 )
+
+internal fun copyBoundedAndDigest(
+    source: InputStream,
+    destination: OutputStream,
+    maximumBytes: Long,
+    digest: MessageDigest,
+): Long {
+    require(maximumBytes >= 0) { "Byte limit cannot be negative" }
+    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+    var total = 0L
+    while (true) {
+        val count = source.read(buffer)
+        if (count < 0) break
+        val bytesRead: Int
+        if (count == 0) {
+            val next = source.read()
+            if (next < 0) break
+            buffer[0] = next.toByte()
+            bytesRead = 1
+        } else {
+            bytesRead = count
+        }
+        if (total > maximumBytes - bytesRead.toLong()) {
+            throw IllegalArgumentException("Import exceeds the $maximumBytes byte limit")
+        }
+        digest.update(buffer, 0, bytesRead)
+        destination.write(buffer, 0, bytesRead)
+        total += bytesRead
+    }
+    return total
+}
 
 /** Copies a selected APK into private storage; it does not install or execute the package. */
 class ApkImporter(
@@ -183,24 +216,11 @@ class ApkImporter(
     private fun copyAndDigest(uri: Uri, destination: Path, digest: MessageDigest): Long {
         val input = applicationContext.contentResolver.openInputStream(uri)
             ?: throw IOException("Unable to read the selected document")
-        var total = 0L
-        input.use { source ->
+        return input.use { source ->
             Files.newOutputStream(destination).use { output ->
-                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                while (true) {
-                    val count = source.read(buffer)
-                    if (count < 0) break
-                    if (count == 0) continue
-                    if (total > MAX_APK_BYTES - count) {
-                        throw IllegalArgumentException("APK exceeds the $MAX_APK_BYTES byte import limit")
-                    }
-                    digest.update(buffer, 0, count)
-                    output.write(buffer, 0, count)
-                    total += count
-                }
+                copyBoundedAndDigest(source, output, MAX_APK_BYTES, digest)
             }
         }
-        return total
     }
 
     @Suppress("DEPRECATION")

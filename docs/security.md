@@ -4,7 +4,7 @@
 
 - APKs, registry files, package metadata, ZIP entries, ELF headers, and library names are untrusted input.
 - Imported data stays below the app's private files directory. A generated UUID is part of each guest root so two imports do not share mutable files.
-- Registry fields are validated on both write and read. Corrupt registry data causes a visible startup failure; the original file is not silently replaced with an empty registry.
+- Registry fields are validated on both write and read. The registry file is opened without following symbolic links. Corrupt registry data causes a visible startup failure; the original file is not silently replaced with an empty registry.
 - The filesystem mapper allows only explicit package-private `/data` and app-specific external data/OBB prefixes. It rejects traversal, NULs, unknown roots, and symlink components.
 - Clear Data operates only on that import's internal and app-specific external directories. Remove operates only on its validated UUID root and does not follow symlinks.
 - APK import copies bytes, reads package metadata, and catalogs native-library names. It performs a bounded read-only ELF preflight (header plus program-header table, with per-library and archive work caps), records structural failures, and never extracts a `.so`; a passing result does not prove dependencies, relocations, symbols, loadability, or launch support. Import does not call the package installer or load guest code.

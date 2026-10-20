@@ -11,6 +11,15 @@ local.properties
 /native/build/
 CMakeUserPresets.json
 
+# Local signing credentials and environment-specific configuration
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+.env
+.env.*
+!.env.example
+
 # Temporary/imported app data (never commit user APKs)
 *.apk
 *.obb

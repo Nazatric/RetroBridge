@@ -5,6 +5,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Test
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 
 class FileGuestAppRepositoryTest {
@@ -43,6 +44,20 @@ class FileGuestAppRepositoryTest {
             repository.update(record.id) { it.copy(id = "423e4567-e89b-42d3-a456-426614174000") }
         }
         assertEquals(record, repository.get(record.id))
+    }
+
+    @Test
+    fun registryReadDoesNotFollowSymbolicLinks() {
+        val directory = Files.createTempDirectory("retrobridge-registry-symlink-test")
+        val target = directory.resolve("outside.json")
+        val registry = directory.resolve("registry.json")
+        Files.write(target, "[]".toByteArray(StandardCharsets.UTF_8))
+        Files.createSymbolicLink(registry, target.fileName)
+
+        assertThrows(IllegalStateException::class.java) {
+            FileGuestAppRepository(registry)
+        }
+        assertEquals("[]", String(Files.readAllBytes(target), StandardCharsets.UTF_8))
     }
 
     private fun sampleRecord(packageName: String, id: String) = GuestAppRecord(

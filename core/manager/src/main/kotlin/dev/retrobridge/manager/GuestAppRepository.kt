@@ -5,6 +5,7 @@ import kotlinx.serialization.json.Json
 import java.nio.charset.StandardCharsets
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
@@ -72,9 +73,11 @@ class FileGuestAppRepository(
     }
 
     private fun load(): LinkedHashMap<String, GuestAppRecord> {
-        if (!Files.exists(registryFile)) return linkedMapOf()
+        if (!Files.exists(registryFile, LinkOption.NOFOLLOW_LINKS)) return linkedMapOf()
         try {
-            val contents = Files.newBufferedReader(registryFile, StandardCharsets.UTF_8).use { it.readText() }
+            val contents = Files.newInputStream(registryFile, LinkOption.NOFOLLOW_LINKS)
+                .bufferedReader(StandardCharsets.UTF_8)
+                .use { it.readText() }
             val decoded = json.decodeFromString(serializer, contents)
             val result = linkedMapOf<String, GuestAppRecord>()
             decoded.forEach { record ->
