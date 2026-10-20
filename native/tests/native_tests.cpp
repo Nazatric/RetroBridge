@@ -156,8 +156,8 @@ std::vector<std::byte> make_loadable_arm_elf(
     put_u32(bytes, 116, 2);
     put_u32(bytes, 120, 0x100);
     put_u32(bytes, 124, 0x100);
-    put_u32(bytes, 132, 0x80);
-    put_u32(bytes, 136, 0x80);
+    put_u32(bytes, 132, 0x88);
+    put_u32(bytes, 136, 0x88);
     put_u32(bytes, 140, 4);
     put_u32(bytes, 144, 4);
 
@@ -167,7 +167,7 @@ std::vector<std::byte> make_loadable_arm_elf(
         strings.push_back('\0');
     }
     const std::array<std::pair<std::uint32_t, std::uint32_t>, 17> dynamic_entries{{
-        {include_sysv_hash ? 4U : 21U, 0x180}, // DT_HASH or harmless DT_DEBUG
+        {include_sysv_hash ? 4U : 21U, 0x1c0}, // DT_HASH or harmless DT_DEBUG
         {0x6ffffef5U, 0x1a0},                 // DT_GNU_HASH
         {5, 0x240},                           // DT_STRTAB
         {6, 0x200},                           // DT_SYMTAB
@@ -182,7 +182,7 @@ std::vector<std::byte> make_loadable_arm_elf(
         {13, 0x340},                          // DT_FINI
         {26, 0x1024},                         // DT_FINI_ARRAY
         {28, 4},                              // DT_FINI_ARRAYSZ
-        {needed_library.empty() ? 21U : 1U, needed_library.empty() ? 0U : 19U}, // DT_DEBUG or DT_NEEDED
+        {needed_library.empty() ? 0U : 1U, needed_library.empty() ? 0U : 19U}, // DT_NULL or DT_NEEDED
         {0, 0},                               // DT_NULL
     }};
     for (std::size_t index = 0; index < dynamic_entries.size(); ++index) {
@@ -191,12 +191,12 @@ std::vector<std::byte> make_loadable_arm_elf(
     }
 
     // SysV hash: one bucket, three dynsym entries, and a two-symbol chain.
-    put_u32(bytes, 0x180, 1);
-    put_u32(bytes, 0x184, 3);
-    put_u32(bytes, 0x188, 1);
-    put_u32(bytes, 0x18c, 0);
-    put_u32(bytes, 0x190, 2);
-    put_u32(bytes, 0x194, 0);
+    put_u32(bytes, 0x1c0, 1);
+    put_u32(bytes, 0x1c4, 3);
+    put_u32(bytes, 0x1c8, 1);
+    put_u32(bytes, 0x1cc, 0);
+    put_u32(bytes, 0x1d0, 2);
+    put_u32(bytes, 0x1d4, 0);
 
     // GNU hash: all names pass the bloom filter; two chain entries end at symbol 2.
     put_u32(bytes, 0x1a0, 1);
