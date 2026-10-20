@@ -313,7 +313,7 @@ jobs:
           "$ADB" shell settings put global animator_duration_scale 0
           "$ADB" shell input keyevent 82
 
-      - name: Run signed ARM32 demo APK through guest_runtime on emulator
+      - name: Run Compose UI regression and signed ARM32 demo through guest_runtime on emulator
         shell: bash
         run: |
           set -euo pipefail
