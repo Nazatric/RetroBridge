@@ -82,14 +82,14 @@ class DiagnosticsScreenInstrumentedTest {
             .performScrollTo()
             .assertIsDisplayed()
         composeRule.onNodeWithText("Repeated 3 times").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Technical detail").performScrollTo().performClick()
-        composeRule.onNodeWithText("lib/armeabi-v7a/libgame.so").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("0xe12fff1e").performScrollTo().assertIsDisplayed()
 
         composeRule.onNodeWithText("Component: All").performScrollTo().performClick()
         composeRule.onNodeWithText("Native dependency resolver").performClick()
         composeRule.onAllNodesWithText("Selected native entrypoints completed.").assertCountEquals(0)
         composeRule.onNodeWithText("Required native library libfoo.so is unavailable.").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Technical detail").performScrollTo().performClick()
+        composeRule.onNodeWithText("lib/armeabi-v7a/libgame.so").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("0xe12fff1e").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Export JSON").performScrollTo().performClick()
         composeRule.runOnIdle { assertEquals(1, exportedCount.intValue) }
     }

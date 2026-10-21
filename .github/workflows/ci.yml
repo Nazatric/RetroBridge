@@ -340,7 +340,7 @@ jobs:
               if [[ "$log" == *gradle.log ]]; then
                 message="$( { grep -n -E 'FAILURE:|What went wrong|Execution failed|FAILED|error:|e: |Caused by:|Could not resolve|A problem occurred' "$log" | tail -n 100 || true; echo '--- last 50 lines ---'; tail -n 50 "$log"; } | base64 -w0)"
               elif [[ "$log" == *emulator-instrumentation.log ]]; then
-                message="$( { grep -n -E -i 'FAILURES!!!|tests? (run|failed|passed)|failed|failure|error|assertion|expected|actual|instrumentation' "$log" | tail -n 100 || true; echo '--- last 80 lines ---'; tail -n 80 "$log"; } | base64 -w0)"
+                message="$( { grep -n -B 8 -A 16 -E -i 'FAILURES!!!|tests? (run|failed|passed)|failed|failure|error|assertion|expected|actual|instrumentation|java.lang.(AssertionError|IllegalStateException|RuntimeException)' "$log" | tail -n 220 || true; echo '--- last 80 lines ---'; tail -n 80 "$log"; } | base64 -w0)"
               elif [[ "$log" == *sdkmanager.log ]]; then
                 message="$( { tr '\r' '\n' < "$log" | grep -Ei '(^|[^[:alpha:]])(error|warning|failed|unknown archive|invalid|corrupt|exception)([^[:alpha:]]|$)' | tail -n 25 || true; echo '--- final progress ---'; tr '\r' '\n' < "$log" | tail -n 5; } | base64 -w0)"
               elif [[ "$log" == *emulator.log ]]; then
