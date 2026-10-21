@@ -239,7 +239,10 @@ class GuestRuntimeContextTest {
     @Test
     fun reportsTheStageAndUnsupportedOpcodeWhenExecutionStops() {
         val fixture = newGuestFixture(
-            nativeLibraries = linkedMapOf("lib/armeabi-v7a/libfoo.so" to byteArrayOf(1, 2, 3, 4)),
+            nativeLibraries = linkedMapOf(
+                "lib/armeabi-v7a/libfoo.so" to byteArrayOf(1, 2, 3, 4),
+                "lib/armeabi-v7a/libbar.so" to byteArrayOf(5, 6, 7, 8),
+            ),
         )
         val native = FakeNativeRuntimeController().apply {
             executionDiagnostic = "unsupported T16 instruction at guest address 4096 (halfword 61440)"

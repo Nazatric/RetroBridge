@@ -2,9 +2,10 @@ package dev.retrobridge.app
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.ui.test.assertDoesNotExist
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
@@ -85,7 +86,7 @@ class DiagnosticsScreenInstrumentedTest {
 
         composeRule.onNodeWithText("Component: All").performScrollTo().performClick()
         composeRule.onNodeWithText("Native dependency resolver").performClick()
-        composeRule.onNodeWithText("Selected native entrypoints completed.").assertDoesNotExist()
+        composeRule.onAllNodesWithText("Selected native entrypoints completed.").assertCountEquals(0)
         composeRule.onNodeWithText("Required native library libfoo.so is unavailable.").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Export JSON").performScrollTo().performClick()
         composeRule.runOnIdle { assertEquals(1, exportedCount.intValue) }
