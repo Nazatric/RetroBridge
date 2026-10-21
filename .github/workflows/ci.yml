@@ -340,7 +340,7 @@ jobs:
               if [[ "$log" == *gradle.log ]]; then
                 message="$( { grep -n -E 'FAILURE:|What went wrong|Execution failed|FAILED|error:|e: |Caused by:|Could not resolve|A problem occurred' "$log" | tail -n 100 || true; echo '--- last 50 lines ---'; tail -n 50 "$log"; } | base64 -w0)"
               elif [[ "$log" == *emulator-instrumentation.log ]]; then
-                message="$( { grep -n -B 8 -A 16 -E -i 'FAILURES!!!|tests? (run|failed|passed)|failed|failure|error|assertion|expected|actual|instrumentation|java.lang.(AssertionError|IllegalStateException|RuntimeException)' "$log" | tail -n 220 || true; echo '--- last 80 lines ---'; tail -n 80 "$log"; } | base64 -w0)"
+                message="$( { grep -n -B 6 -A 14 -E -i 'FAILED|FAILURES!!!|Tests? on .* failed|tests? [0-9]+/[0-9]+ completed|java.lang.(AssertionError|IllegalStateException|RuntimeException)|Expected:|found [0-9]+ nodes' "$log" | tail -n 80 || true; echo '--- final output ---'; tail -n 15 "$log"; } | head -c 2800 | base64 -w0)"
               elif [[ "$log" == *sdkmanager.log ]]; then
                 message="$( { tr '\r' '\n' < "$log" | grep -Ei '(^|[^[:alpha:]])(error|warning|failed|unknown archive|invalid|corrupt|exception)([^[:alpha:]]|$)' | tail -n 25 || true; echo '--- final progress ---'; tr '\r' '\n' < "$log" | tail -n 5; } | base64 -w0)"
               elif [[ "$log" == *emulator.log ]]; then
@@ -366,6 +366,21 @@ jobs:
             -exec grep -H -n -A 12 -B 2 -E '<failure|<error' {} + || true)"
           if [[ -n "$test_failures" ]]; then
             echo "::error title=RetroBridge JUnit failures base64::$(printf '%s' "$test_failures" | base64 -w0)"
+          fi
+          android_test_reports="$(
+            for root in app/build/outputs/androidTest-results app/build/reports/androidTests; do
+              if [[ -d "$root" ]]; then
+                find "$root" -type f \
+                  \( -name '*.xml' -o -name '*.txt' -o -name '*.html' \) -print | sort
+                grep -R -n -i -E 'failure|failed|assertion|exception|expected|actual' "$root" \
+                  --include='*.xml' --include='*.txt' --include='*.html' | tail -n 80 || true
+              else
+                echo "$root: no report directory"
+              fi
+            done
+          )"
+          if [[ -n "$android_test_reports" ]]; then
+            echo "::error title=RetroBridge Android test reports base64::$(printf '%s' "$android_test_reports" | head -c 2800 | base64 -w0)"
           fi
 
       - name: Upload APKs, ELF fixtures, test binaries, and diagnostics
