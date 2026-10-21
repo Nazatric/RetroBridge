@@ -477,7 +477,7 @@ class GuestRuntimeSessionSupervisor(
                 packageName = session.context.packageName,
                 timestampEpochMs = clock(),
                 instructions = session.report.guestInstructions,
-                libraries = session.report.loadedLibraries,
+                libraries = session.report.loadedLibraries.toList(),
             )
             GuestRuntimeSessionState.STOPPED -> RuntimeDiagnosticClassifier.sessionStopped(
                 guestId = session.context.guestId,
