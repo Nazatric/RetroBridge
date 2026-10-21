@@ -78,8 +78,10 @@ class DiagnosticsScreenInstrumentedTest {
             }
         }
 
-        composeRule.onNodeWithText("Required native library libfoo.so is unavailable.").assertIsDisplayed()
-        composeRule.onNodeWithText("Repeated 3 times").assertIsDisplayed()
+        composeRule.onNodeWithText("Required native library libfoo.so is unavailable.")
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule.onNodeWithText("Repeated 3 times").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Technical detail").performScrollTo().performClick()
         composeRule.onNodeWithText("lib/armeabi-v7a/libgame.so").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("0xe12fff1e").performScrollTo().assertIsDisplayed()

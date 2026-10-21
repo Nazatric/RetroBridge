@@ -32,7 +32,7 @@ class MainActivityUiTest {
     @Test
     fun diagnosticsViewExplainsEmptyStateAndProvidesSearchAndExport() {
         composeRule.onNodeWithText("Diagnostics (0)").performScrollTo().performClick()
-        composeRule.onNodeWithText("No diagnostics yet").assertIsDisplayed()
+        composeRule.onNodeWithText("No diagnostics yet").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Search diagnostics").assertIsDisplayed()
         composeRule.onNodeWithText("Export JSON").assertHasClickAction()
     }
