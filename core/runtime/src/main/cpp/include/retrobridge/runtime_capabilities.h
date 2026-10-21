@@ -13,6 +13,7 @@ struct RuntimeCapabilities final {
     bool native_guest_vfs = true;
     bool arm32_eabi_syscall_subset = true;
     bool guest_bionic_libc_libm_pthread_thunks = true;
+    bool bounded_dlfcn_preloaded_library_lookup = true;
     bool bionic_and_guest_syscalls = false;
     bool synthetic_jni_tables_and_handle_subset = true;
     bool synthetic_jni = false;

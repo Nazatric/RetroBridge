@@ -7,6 +7,7 @@
 #include "retrobridge/guest_android_input_thunks.h"
 #include "retrobridge/guest_android_window_thunks.h"
 #include "retrobridge/guest_bionic_thunks.h"
+#include "retrobridge/guest_dlfcn_thunks.h"
 #include "retrobridge/guest_headless_gles_egl_thunks.h"
 #include "retrobridge/guest_heap.h"
 #include "retrobridge/guest_jni_bridge.h"
@@ -92,6 +93,13 @@ private:
         std::string_view name,
         std::size_t importing_image,
         const std::vector<std::size_t>& order) const noexcept;
+    [[nodiscard]] std::optional<std::string> canonicalize_dynamic_library(std::string_view name) const;
+    [[nodiscard]] std::optional<std::uint32_t> resolve_dynamic_symbol(
+        std::string_view library,
+        std::string_view symbol) const;
+    [[nodiscard]] std::optional<std::uint32_t> resolve_platform_symbol(
+        std::string_view library,
+        std::string_view symbol) const noexcept;
     [[nodiscard]] ExecutionResult invoke_guest_function(
         GuestAddress32 function,
         std::uint64_t instruction_budget,
@@ -119,6 +127,7 @@ private:
     GuestAndroidInputThunks input_;
     GuestHeadlessGlesEglThunks gles_;
     GuestOpenSlThunks opensl_;
+    GuestDlfcnThunks dlfcn_;
     std::vector<Library> images_;
     std::vector<std::size_t> initialized_image_order_;
     GuestCpuState32 cpu_state_{};

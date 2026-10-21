@@ -55,7 +55,12 @@ NativeExecutionSession::NativeExecutionSession(std::filesystem::path app_root, s
       windows_(memory_, heap_, trampolines_),
       input_(memory_, heap_, trampolines_),
       gles_(memory_, heap_, trampolines_, windows_),
-      opensl_(memory_, heap_, trampolines_) {}
+      opensl_(memory_, heap_, trampolines_),
+      dlfcn_(memory_, heap_, trampolines_,
+          [this](std::string_view name) { return canonicalize_dynamic_library(name); },
+          [this](std::string_view library, std::string_view symbol) {
+              return resolve_dynamic_symbol(library, symbol);
+          }) {}
 
 NativeExecutionSession::~NativeExecutionSession() {
     stop();
@@ -93,6 +98,7 @@ bool NativeExecutionSession::initialize(std::string* diagnostic) {
     if (!install(input_.install(&detail), "synthetic Android input thunks")) return false;
     if (!install(gles_.install(&detail), "headless EGL/GLES thunks")) return false;
     if (!install(opensl_.install(&detail), "synthetic OpenSL ES thunks")) return false;
+    if (!install(dlfcn_.install(&detail), "bounded dlfcn thunks")) return false;
 
     cpu_state_ = GuestCpuState32{};
     cpu_state_.r[13] = kGuestStackBase + kGuestStackSize - 16U;
@@ -257,6 +263,109 @@ bool NativeExecutionSession::supported_platform_library(std::string_view name) c
     return std::find(kPlatformLibraries.begin(), kPlatformLibraries.end(), name) != kPlatformLibraries.end();
 }
 
+std::optional<std::string> NativeExecutionSession::canonicalize_dynamic_library(std::string_view name) const {
+    // This session has shared libraries but no main guest executable image.
+    if (name.empty()) return std::nullopt;
+    const auto separator = name.find_last_of("/\\");
+    if (separator != std::string_view::npos) name.remove_prefix(separator + 1U);
+    if (!valid_library_name(name)) return std::nullopt;
+
+    for (const auto& library : images_) {
+        if (library.image.name == name || (library.image.soname.has_value() && *library.image.soname == name)) {
+            return library.image.name;
+        }
+    }
+    if (supported_platform_library(name)) return std::string(name);
+    return std::nullopt;
+}
+
+std::optional<std::uint32_t> NativeExecutionSession::resolve_platform_symbol(
+    std::string_view library,
+    std::string_view symbol) const noexcept {
+    constexpr std::array<std::string_view, 22> kLibmSymbols{
+        "sqrtf", "sinf", "cosf", "tanf", "fabsf", "floorf", "ceilf", "expf", "logf", "powf", "atan2f",
+        "fmodf", "sqrt", "sin", "cos", "tan", "fabs", "floor", "ceil", "exp", "log", "pow",
+    };
+    constexpr std::array<std::string_view, 2> kRemainingLibmSymbols{"atan2", "fmod"};
+    const auto is_math_symbol = [&] {
+        const auto in_libm_set = std::find(kLibmSymbols.begin(), kLibmSymbols.end(), symbol) != kLibmSymbols.end();
+        const auto in_remaining_set =
+            std::find(kRemainingLibmSymbols.begin(), kRemainingLibmSymbols.end(), symbol) != kRemainingLibmSymbols.end();
+        return in_libm_set || in_remaining_set;
+    };
+
+    if (library == "libc.so") {
+        if (is_math_symbol() || symbol == "__android_log_write" || symbol.starts_with("_Z")
+            || symbol.starts_with("__cxa_")) return std::nullopt;
+        return bionic_.resolve_guest_symbol(symbol);
+    }
+    if (library == "libm.so") {
+        return is_math_symbol() ? bionic_.resolve_symbol(symbol) : std::nullopt;
+    }
+    if (library == "libstdc++.so") {
+        return (symbol.starts_with("_Z") || symbol.starts_with("__cxa_"))
+            ? bionic_.resolve_symbol(symbol) : std::nullopt;
+    }
+    if (library == "libdl.so") return dlfcn_.resolve_symbol(symbol);
+    if (library == "liblog.so") {
+        return symbol == "__android_log_write" ? bionic_.resolve_symbol(symbol) : std::nullopt;
+    }
+    if (library == "libandroid.so") {
+        if (const auto address = assets_.resolve_symbol(symbol); address.has_value()) return address;
+        if (const auto address = windows_.resolve_symbol(symbol); address.has_value()) return address;
+        return input_.resolve_symbol(symbol);
+    }
+    if (library == "libEGL.so") {
+        return symbol.starts_with("egl") ? gles_.resolve_symbol(symbol) : std::nullopt;
+    }
+    if (library == "libGLESv1_CM.so" || library == "libGLESv2.so" || library == "libGLESv3.so") {
+        return symbol.starts_with("gl") ? gles_.resolve_symbol(symbol) : std::nullopt;
+    }
+    if (library == "libOpenSLES.so") {
+        return (symbol.starts_with("sl") || symbol.starts_with("SL_IID_"))
+            ? opensl_.resolve_symbol(symbol) : std::nullopt;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::uint32_t> NativeExecutionSession::resolve_dynamic_symbol(
+    std::string_view library,
+    std::string_view symbol) const {
+    if (library.empty()) {
+        std::vector<std::size_t> order;
+        order.reserve(images_.size());
+        for (std::size_t index = 0; index < images_.size(); ++index) order.push_back(index);
+        return resolve_symbol(symbol, images_.size(), order);
+    }
+
+    const auto find_library = [this](std::string_view name) -> std::optional<std::size_t> {
+        for (std::size_t index = 0; index < images_.size(); ++index) {
+            const auto& image = images_[index].image;
+            if (image.name == name || (image.soname.has_value() && *image.soname == name)) return index;
+        }
+        return std::nullopt;
+    };
+    if (const auto root = find_library(library); root.has_value()) {
+        std::vector<std::uint8_t> visited(images_.size(), 0);
+        std::function<std::optional<std::uint32_t>(std::size_t)> search = [&](std::size_t index) {
+            if (visited[index] != 0) return std::optional<std::uint32_t>{};
+            visited[index] = 1;
+            const auto& image = images_[index].image;
+            if (const auto address = image.lookup_symbol(symbol); address.has_value()) return address;
+            for (const auto& dependency : image.needed_libraries) {
+                if (const auto local = find_library(dependency); local.has_value()) {
+                    if (const auto address = search(*local); address.has_value()) return address;
+                } else if (const auto address = resolve_platform_symbol(dependency, symbol); address.has_value()) {
+                    return address;
+                }
+            }
+            return std::optional<std::uint32_t>{};
+        };
+        return search(*root);
+    }
+    return resolve_platform_symbol(library, symbol);
+}
+
 std::optional<std::uint32_t> NativeExecutionSession::resolve_symbol(
     std::string_view name,
     std::size_t importing_image,
@@ -273,6 +382,7 @@ std::optional<std::uint32_t> NativeExecutionSession::resolve_symbol(
     if (const auto address = input_.resolve_symbol(name); address.has_value()) return address;
     if (const auto address = gles_.resolve_symbol(name); address.has_value()) return address;
     if (const auto address = opensl_.resolve_symbol(name); address.has_value()) return address;
+    if (const auto address = dlfcn_.resolve_symbol(name); address.has_value()) return address;
     return trampolines_.resolve_symbol(name);
 }
 

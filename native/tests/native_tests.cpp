@@ -7,6 +7,7 @@
 #include "retrobridge/guest_heap.h"
 #include "retrobridge/guest_jni_bridge.h"
 #include "retrobridge/guest_bionic_thunks.h"
+#include "retrobridge/guest_dlfcn_thunks.h"
 #include "retrobridge/guest_android_asset_thunks.h"
 #include "retrobridge/guest_android_window_thunks.h"
 #include "retrobridge/guest_android_input_thunks.h"
@@ -464,6 +465,10 @@ void test_native_session_accepts_explicit_virtual_platform_dependencies() {
             && supported_gles3.loaded_libraries.front() == "libdependency_probe.so",
         "libGLESv3.so is a virtual dependency name and glClear resolves only through the implemented headless GLES thunk");
 
+    const auto supported_dlfcn = run_dependency_fixture("libdl.so", "dlfcn", "dlopen");
+    check(supported_dlfcn.success && supported_dlfcn.relocation_count == 3,
+        "the virtual libdl.so dependency resolves the implemented dlopen thunk without loading a system DSO");
+
     const auto unsupported_gles_symbol = run_dependency_fixture(
         "libGLESv3.so", "gles3-unsupported", "glCreateShader");
     check(!unsupported_gles_symbol.success && !unsupported_gles_symbol.diagnostics.empty()
@@ -840,6 +845,150 @@ void test_guest_heap_allocation_and_coalescing() {
     if (whole_heap.has_value()) check(heap.free(*whole_heap), "full guest heap allocation frees");
     heap.shutdown();
     check(!memory.is_mapped(GuestAddress32{0x10000000U}), "heap shutdown unmaps its guest arena");
+}
+
+void test_guest_dlfcn_bounded_virtual_lookup() {
+    using namespace retrobridge::runtime;
+    constexpr std::uint32_t kReturnAddress = 0x8000U;
+    constexpr std::uint32_t kGuestData = 0x20000U;
+
+    GuestMemory memory(1024U * 1024U);
+    GuestHeap32 heap(memory);
+    check(heap.initialize(GuestAddress32{0x10000000U}, 64U * 1024U), "dlfcn guest heap initializes");
+    GuestTrampolineRegistry trampolines;
+    const std::array<std::byte, 4> return_code{std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0xef}};
+    check(memory.map_bytes(GuestAddress32{kReturnAddress}, return_code, return_code.size(),
+        GuestPermission::Read | GuestPermission::Execute), "dlfcn thunk return SVC maps executable");
+    check(memory.map_zeroed(GuestAddress32{kGuestData}, 0x4000U,
+        GuestPermission::Read | GuestPermission::Write), "dlfcn thunk strings map read/write");
+
+    GuestDlfcnThunks thunks(memory, heap, trampolines,
+        [](std::string_view requested) -> std::optional<std::string> {
+            if (requested == "libfixture.so") return std::string("libfixture.so");
+            if (requested == "libGLESv3.so") return std::string("libGLESv3.so");
+            if (requested.empty()) return std::string{};
+            return std::nullopt;
+        },
+        [](std::string_view library, std::string_view symbol) -> std::optional<std::uint32_t> {
+            if (library == "libfixture.so" && symbol == "fixture_export") return 0x12345678U;
+            if (library == "libGLESv3.so" && symbol == "glClear") return 0x1234567cU;
+            if (library.empty() && symbol == "global_export") return 0x12345680U;
+            return std::nullopt;
+        });
+    std::string diagnostic;
+    check(thunks.install(&diagnostic), "bounded dlfcn thunk table installs");
+    check(thunks.resolve_symbol("dlopen").has_value() && thunks.resolve_symbol("dlsym").has_value()
+            && thunks.resolve_symbol("dlclose").has_value() && thunks.resolve_symbol("dlerror").has_value(),
+        "libdl exposes only the implemented dlopen/dlsym/dlclose/dlerror entrypoints");
+
+    const auto svc = [](GuestCpuState32& state, std::uint32_t immediate, GuestMemory&) {
+        if (immediate == 0 && state.r[7] == 1) return GuestHookResult{GuestHookAction::Stop, "dlfcn thunk return"};
+        return GuestHookResult{GuestHookAction::Fault, "unexpected dlfcn thunk SVC"};
+    };
+    Arm32Interpreter interpreter(memory, trampolines, svc);
+    const auto invoke = [&](std::string_view name, GuestCpuState32 state) {
+        const auto function = thunks.resolve_symbol(name);
+        if (!function.has_value()) {
+            check(false, "dlfcn test symbol resolves to a guest trampoline");
+            return std::pair{state, ExecutionResult{}};
+        }
+        state.r[7] = 1;
+        state.r[14] = kReturnAddress;
+        auto result = interpreter.run(state, GuestAddress32{*function}, 32);
+        check(result.status == ExecutionStatus::Completed, "dlfcn thunk returns through guest execution");
+        return std::pair{state, result};
+    };
+    const auto write_string = [&](std::uint32_t address, std::string_view value) {
+        std::vector<std::byte> bytes(value.size() + 1U, std::byte{0});
+        for (std::size_t index = 0; index < value.size(); ++index) {
+            bytes[index] = static_cast<std::byte>(static_cast<unsigned char>(value[index]));
+        }
+        return memory.write(GuestAddress32{address}, bytes);
+    };
+    const auto read_string = [&](std::uint32_t address) {
+        std::string value;
+        for (std::size_t index = 0; index < 1024; ++index) {
+            const auto byte = memory.read_u8(GuestAddress32{address + static_cast<std::uint32_t>(index)});
+            if (!byte.has_value()) return std::string{};
+            if (*byte == 0) return value;
+            value.push_back(static_cast<char>(*byte));
+        }
+        return std::string{};
+    };
+
+    check(write_string(kGuestData, "libfixture.so") && write_string(kGuestData + 0x100U, "fixture_export")
+            && write_string(kGuestData + 0x200U, "missing_export")
+            && write_string(kGuestData + 0x300U, "libGLESv3.so")
+            && write_string(kGuestData + 0x400U, "glClear")
+            && write_string(kGuestData + 0x500U, "global_export")
+            && write_string(kGuestData + 0x600U, "libunknown.so"),
+        "dlfcn test strings are written into bounded guest memory");
+
+    GuestCpuState32 state{};
+    state.r[0] = kGuestData;
+    state.r[1] = 2U; // RTLD_NOW
+    const auto opened = invoke("dlopen", state);
+    const auto library_handle = opened.first.r[0];
+    check(library_handle != 0 && memory.read_u32(GuestAddress32{library_handle}).value_or(0U) == 0x5242444cU,
+        "dlopen returns a validated opaque guest handle for an already-available library");
+
+    state = GuestCpuState32{};
+    state.r[0] = library_handle;
+    state.r[1] = kGuestData + 0x100U;
+    const auto found_symbol = invoke("dlsym", state);
+    check(found_symbol.first.r[0] == 0x12345678U, "dlsym resolves an APK-local exported guest symbol");
+
+    state = GuestCpuState32{};
+    state.r[0] = library_handle;
+    state.r[1] = kGuestData + 0x200U;
+    const auto missing_symbol = invoke("dlsym", state);
+    check(missing_symbol.first.r[0] == 0, "dlsym fails closed for an unsupported import");
+    state = GuestCpuState32{};
+    const auto symbol_error = invoke("dlerror", state);
+    check(symbol_error.first.r[0] != 0 && read_string(symbol_error.first.r[0]).find("missing_export") != std::string::npos,
+        "dlerror reports the precise unresolved dynamic symbol once");
+    state = GuestCpuState32{};
+    check(invoke("dlerror", state).first.r[0] == 0, "dlerror clears the pending diagnostic after it is read");
+
+    state = GuestCpuState32{};
+    state.r[0] = kGuestData + 0x300U;
+    state.r[1] = 1U; // RTLD_LAZY
+    const auto opened_gles = invoke("dlopen", state);
+    state = GuestCpuState32{};
+    state.r[0] = opened_gles.first.r[0];
+    state.r[1] = kGuestData + 0x400U;
+    check(opened_gles.first.r[0] != 0 && invoke("dlsym", state).first.r[0] == 0x1234567cU,
+        "dlopen of virtual libGLESv3 resolves only its explicitly provided glClear thunk");
+
+    state = GuestCpuState32{};
+    state.r[0] = 0; // RTLD_DEFAULT
+    state.r[1] = kGuestData + 0x500U;
+    check(invoke("dlsym", state).first.r[0] == 0x12345680U,
+        "dlsym supports the explicitly supplied global session scope");
+    state.r[0] = 0xffffffffU; // RTLD_NEXT
+    check(invoke("dlsym", state).first.r[0] == 0,
+        "dlsym rejects RTLD_NEXT when guest caller-scope tracking is unavailable");
+
+    state = GuestCpuState32{};
+    state.r[0] = kGuestData + 0x600U;
+    state.r[1] = 2U;
+    check(invoke("dlopen", state).first.r[0] == 0,
+        "dlopen rejects libraries that are neither preloaded APK images nor virtual platform names");
+    state = GuestCpuState32{};
+    check(read_string(invoke("dlerror", state).first.r[0]).find("libunknown.so") != std::string::npos,
+        "dlopen failure is reported through dlerror");
+
+    state = GuestCpuState32{};
+    state.r[0] = library_handle;
+    check(invoke("dlclose", state).first.r[0] == 0, "dlclose releases a valid guest lookup handle");
+    state = GuestCpuState32{};
+    state.r[0] = library_handle;
+    state.r[1] = kGuestData + 0x100U;
+    check(invoke("dlsym", state).first.r[0] == 0,
+        "dlsym rejects a handle after dlclose");
+
+    thunks.shutdown();
+    heap.shutdown();
 }
 
 void test_guest_bionic_libc_libm_and_pthread_thunks() {
@@ -3962,6 +4111,8 @@ void test_capabilities_and_optional_dbt_placeholder() {
         "the implemented ARM32 EABI syscall subset is reported available");
     check(retrobridge::runtime::current_capabilities().guest_bionic_libc_libm_pthread_thunks,
         "the explicitly partial Bionic/libc/libm/pthread and C++ ABI thunk subset is reported available");
+    check(retrobridge::runtime::current_capabilities().bounded_dlfcn_preloaded_library_lookup,
+        "bounded dlfcn lookup over preloaded images and explicit virtual providers is reported available");
     check(!retrobridge::runtime::current_capabilities().bionic_and_guest_syscalls,
         "the partial thunk/syscall coverage is not reported as complete Bionic support");
     check(retrobridge::runtime::current_capabilities().synthetic_jni_tables_and_handle_subset,
@@ -4001,6 +4152,7 @@ int main() {
     test_native_vfs_io_and_descriptors();
     test_guest_heap_allocation_and_coalescing();
     test_arm32_syscall_dispatcher_and_guest_vfs();
+    test_guest_dlfcn_bounded_virtual_lookup();
     test_guest_bionic_libc_libm_and_pthread_thunks();
     test_guest_android_asset_thunks();
     test_headless_native_window_buffers_and_lifecycle();
