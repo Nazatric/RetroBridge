@@ -120,7 +120,9 @@ std::uint32_t test_gnu_hash(const std::string& name) {
 }
 
 std::vector<std::byte> make_loadable_arm_elf(
-    bool include_sysv_hash = true, std::string_view needed_library = {}) {
+    bool include_sysv_hash = true,
+    std::string_view needed_library = {},
+    std::string_view imported_symbol = "imported") {
     std::vector<std::byte> bytes(0x1200, std::byte{0});
     bytes[0] = std::byte{0x7f};
     bytes[1] = std::byte{'E'};
@@ -161,7 +163,10 @@ std::vector<std::byte> make_loadable_arm_elf(
     put_u32(bytes, 140, 4);
     put_u32(bytes, 144, 4);
 
-    std::string strings("\0exported\0imported\0", 19);
+    std::string strings("\0exported\0", 10);
+    strings.append(imported_symbol.data(), imported_symbol.size());
+    strings.push_back('\0');
+    const auto needed_library_offset = static_cast<std::uint32_t>(strings.size());
     if (!needed_library.empty()) {
         strings.append(needed_library.data(), needed_library.size());
         strings.push_back('\0');
@@ -182,7 +187,8 @@ std::vector<std::byte> make_loadable_arm_elf(
         {13, 0x340},                          // DT_FINI
         {26, 0x1024},                         // DT_FINI_ARRAY
         {28, 4},                              // DT_FINI_ARRAYSZ
-        {needed_library.empty() ? 0U : 1U, needed_library.empty() ? 0U : 19U}, // DT_NULL or DT_NEEDED
+        {needed_library.empty() ? 0U : 1U,
+            needed_library.empty() ? 0U : needed_library_offset}, // DT_NULL or DT_NEEDED
         {0, 0},                               // DT_NULL
     }};
     for (std::size_t index = 0; index < dynamic_entries.size(); ++index) {
@@ -206,7 +212,7 @@ std::vector<std::byte> make_loadable_arm_elf(
     put_u32(bytes, 0x1b0, 0xffffffffU);
     put_u32(bytes, 0x1b4, 1);
     put_u32(bytes, 0x1b8, test_gnu_hash("exported") & ~1U);
-    put_u32(bytes, 0x1bc, test_gnu_hash("imported") | 1U);
+    put_u32(bytes, 0x1bc, test_gnu_hash(std::string(imported_symbol)) | 1U);
 
     // ELF32_Dyn symbols: null, exported function, undefined imported function.
     put_u32(bytes, 0x210, 1);
@@ -413,16 +419,11 @@ void test_native_execution_session_runs_mapped_library_lifecycle() {
     std::filesystem::remove_all(root);
 }
 
-void test_native_session_accepts_only_explicit_virtual_libstdcxx_dependency() {
+void test_native_session_accepts_explicit_virtual_platform_dependencies() {
     using namespace retrobridge::runtime;
-    const auto run_dependency_fixture = [](std::string_view dependency, std::string_view suffix) {
-        auto bytes = make_loadable_arm_elf(true, dependency);
-        constexpr std::string_view imported_cpp_symbol = "_Znwj";
-        std::fill(bytes.begin() + 0x24a, bytes.begin() + 0x253, std::byte{0});
-        for (std::size_t index = 0; index < imported_cpp_symbol.size(); ++index) {
-            bytes[0x24a + index] = static_cast<std::byte>(static_cast<unsigned char>(imported_cpp_symbol[index]));
-        }
-        put_u32(bytes, 0x1bc, test_gnu_hash(std::string(imported_cpp_symbol)) | 1U);
+    const auto run_dependency_fixture = [](
+        std::string_view dependency, std::string_view suffix, std::string_view imported_symbol) {
+        auto bytes = make_loadable_arm_elf(true, dependency, imported_symbol);
         // Include the imported-symbol relocation plus constructor/finalizer array relocations.
         put_u32(bytes, 0x134, 0x280);
         put_u32(bytes, 0x13c, 24);
@@ -453,11 +454,24 @@ void test_native_session_accepts_only_explicit_virtual_libstdcxx_dependency() {
         return report;
     };
 
-    const auto supported = run_dependency_fixture("libstdc++.so", "cpp");
-    check(supported.success && supported.relocation_count == 3,
-        "the virtual libstdc++.so dependency and imported _Znwj relocation resolve through the explicit partial C++ ABI shim");
+    const auto supported_cpp = run_dependency_fixture("libstdc++.so", "cpp", "_Znwj");
+    check(supported_cpp.success && supported_cpp.relocation_count == 3,
+        "the virtual libstdc++.so dependency and _Znwj relocation resolve through the explicit partial C++ ABI shim");
 
-    const auto unsupported = run_dependency_fixture("libunknown_platform.so", "unknown");
+    const auto supported_gles3 = run_dependency_fixture("libGLESv3.so", "gles3", "glClear");
+    check(supported_gles3.success && supported_gles3.relocation_count == 3
+            && supported_gles3.loaded_libraries.size() == 1
+            && supported_gles3.loaded_libraries.front() == "libdependency_probe.so",
+        "libGLESv3.so is a virtual dependency name and glClear resolves only through the implemented headless GLES thunk");
+
+    const auto unsupported_gles_symbol = run_dependency_fixture(
+        "libGLESv3.so", "gles3-unsupported", "glCreateShader");
+    check(!unsupported_gles_symbol.success && !unsupported_gles_symbol.diagnostics.empty()
+            && unsupported_gles_symbol.diagnostics.front().find("undefined-symbol") != std::string::npos
+            && unsupported_gles_symbol.diagnostics.front().find("glCreateShader") != std::string::npos,
+        "a virtual libGLESv3.so dependency does not fabricate an unsupported shader symbol");
+
+    const auto unsupported = run_dependency_fixture("libunknown_platform.so", "unknown", "_Znwj");
     check(!unsupported.success && !unsupported.diagnostics.empty()
             && unsupported.diagnostics.front().find("requires unavailable library libunknown_platform.so") != std::string::npos,
         "unknown platform dependencies still fail closed with their name in the diagnostic");
@@ -3980,7 +3994,7 @@ int main() {
     test_guest_memory_permissions_and_bounds();
     test_elf32_loader_maps_symbols_relocations_and_constructors();
     test_native_execution_session_runs_mapped_library_lifecycle();
-    test_native_session_accepts_only_explicit_virtual_libstdcxx_dependency();
+    test_native_session_accepts_explicit_virtual_platform_dependencies();
     test_elf_validation_and_dependencies();
     test_opaque_handles_and_generation();
     test_native_vfs_path_translation();

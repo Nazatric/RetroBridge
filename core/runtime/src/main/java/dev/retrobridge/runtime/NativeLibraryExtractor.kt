@@ -53,6 +53,7 @@ object NativeLibraryExtractor {
         "libEGL.so",
         "libGLESv1_CM.so",
         "libGLESv2.so",
+        "libGLESv3.so",
         "libOpenSLES.so",
         "libjnigraphics.so",
     )
