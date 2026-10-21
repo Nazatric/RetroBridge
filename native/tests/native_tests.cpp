@@ -3916,6 +3916,19 @@ void test_a32_t32_execution_svc_and_trampolines() {
     const auto loop_result = interpreter.run(loop_state, GuestAddress32{0x4000}, 3);
     check(loop_result.status == ExecutionStatus::BudgetExhausted && loop_result.guest_instructions == 3,
         "A32 backward branches cannot exceed the instruction budget");
+
+    std::vector<std::byte> unsupported_program(4, std::byte{0});
+    put_u32(unsupported_program, 0, 0xe00f0090U); // mul pc, r0, r0 (unsupported PC destination)
+    check(memory.map_bytes(GuestAddress32{0x6000U}, unsupported_program, unsupported_program.size(),
+            GuestPermission::Read | GuestPermission::Execute),
+        "unsupported instruction diagnostic fixture maps RX");
+    GuestCpuState32 unsupported_state{};
+    const auto unsupported_result = interpreter.run(unsupported_state, GuestAddress32{0x6000U}, 4);
+    check(unsupported_result.status == ExecutionStatus::GuestFault
+            && unsupported_result.diagnostic.find("MUL/MLA targeting PC is unsupported") != std::string::npos
+            && unsupported_result.diagnostic.find("guest address 24576") != std::string::npos
+            && unsupported_result.diagnostic.find("word 3759079568") != std::string::npos,
+        "unsupported A32 instruction faults preserve the guest PC and exact opcode without emulation");
 }
 
 void test_capabilities_and_optional_dbt_placeholder() {

@@ -29,6 +29,20 @@ struct StepResult final {
     return {GuestHookAction::Fault, std::move(diagnostic)};
 }
 
+[[nodiscard]] std::string annotate_instruction_fault(
+    std::string diagnostic,
+    std::uint32_t guest_pc,
+    const char* encoded_width,
+    std::uint32_t encoding) {
+    if (diagnostic.find("(word ") != std::string::npos
+        || diagnostic.find("(halfword ") != std::string::npos) return diagnostic;
+    if (diagnostic.find("guest address") == std::string::npos) {
+        diagnostic += " at guest address " + std::to_string(guest_pc);
+    }
+    diagnostic += " (" + std::string(encoded_width) + " " + std::to_string(encoding) + ")";
+    return diagnostic;
+}
+
 [[nodiscard]] std::int64_t sign_extend(std::uint32_t value, unsigned bit_count) noexcept {
     const auto range = std::uint64_t{1} << bit_count;
     const auto sign_bit = range >> 1U;
@@ -1569,7 +1583,8 @@ ExecutionResult Arm32Interpreter::run(
         if (is_thumb) {
             std::array<std::byte, 2> first_bytes{};
             if (!memory_.read(GuestAddress32{pc}, first_bytes, GuestPermission::Execute)) {
-                return {ExecutionStatus::GuestFault, executed, "T16 fetch from unmapped or non-executable guest memory"};
+                return {ExecutionStatus::GuestFault, executed,
+                    "T16 fetch from unmapped or non-executable guest memory at guest address " + std::to_string(pc)};
             }
             const auto first = static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(first_bytes[0])
                 | (static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(first_bytes[1])) << 8U));
@@ -1578,7 +1593,8 @@ ExecutionResult Arm32Interpreter::run(
             if (wide) {
                 std::array<std::byte, 2> second_bytes{};
                 if (!memory_.read(GuestAddress32{pc + 2U}, second_bytes, GuestPermission::Execute)) {
-                    return {ExecutionStatus::GuestFault, executed, "T32 second halfword fetch is unmapped or non-executable"};
+                    return {ExecutionStatus::GuestFault, executed,
+                        "T32 second halfword fetch is unmapped or non-executable at guest address " + std::to_string(pc + 2U)};
                 }
                 second = static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(second_bytes[0])
                     | (static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(second_bytes[1])) << 8U));
@@ -1598,12 +1614,17 @@ ExecutionResult Arm32Interpreter::run(
                 return {ExecutionStatus::Completed, executed, result.diagnostic};
             }
             if (result.action == GuestHookAction::Fault) {
-                return {ExecutionStatus::GuestFault, executed, result.diagnostic};
+                const auto encoding = wide
+                    ? (static_cast<std::uint32_t>(first) << 16U) | second
+                    : static_cast<std::uint32_t>(first);
+                return {ExecutionStatus::GuestFault, executed,
+                    annotate_instruction_fault(result.diagnostic, pc, wide ? "word" : "halfword", encoding)};
             }
         } else {
             std::array<std::byte, 4> bytes{};
             if (!memory_.read(GuestAddress32{pc}, bytes, GuestPermission::Execute)) {
-                return {ExecutionStatus::GuestFault, executed, "A32 fetch from unmapped or non-executable guest memory"};
+                return {ExecutionStatus::GuestFault, executed,
+                    "A32 fetch from unmapped or non-executable guest memory at guest address " + std::to_string(pc)};
             }
             std::uint32_t instruction = 0;
             for (std::size_t index = 0; index < bytes.size(); ++index) {
@@ -1616,11 +1637,13 @@ ExecutionResult Arm32Interpreter::run(
                 return {ExecutionStatus::Completed, executed, result.diagnostic};
             }
             if (result.action == GuestHookAction::Fault) {
-                return {ExecutionStatus::GuestFault, executed, result.diagnostic};
+                return {ExecutionStatus::GuestFault, executed,
+                    annotate_instruction_fault(result.diagnostic, pc, "word", instruction)};
             }
         }
     }
-    return {ExecutionStatus::BudgetExhausted, executed, "guest instruction budget exhausted"};
+    return {ExecutionStatus::BudgetExhausted, executed,
+        "guest instruction budget exhausted at guest address " + std::to_string(state.r[15])};
 }
 
 void Arm32Interpreter::invalidate(GuestRange32 guest_code) noexcept {

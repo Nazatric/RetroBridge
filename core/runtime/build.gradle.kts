@@ -40,5 +40,6 @@ android {
 }
 
 dependencies {
+    implementation(project(":core:services"))
     testImplementation("junit:junit:4.13.2")
 }

@@ -208,10 +208,13 @@ class GuestRuntimeContextTest {
         assertEquals(2, first.registeredNativeCount)
         assertEquals(listOf("libbar.so", "libfoo.so"), native.loadedFileNames)
         assertEquals(100L, first.startedAtEpochMs)
+        assertEquals("RUNTIME_SESSION_RUNNING", first.diagnosticEvent?.code)
+        assertEquals("NATIVE_EXECUTION", first.diagnosticEvent?.operation?.name)
         val sessionId = first.sessionId ?: error("Expected an active interpreter session")
 
         val stopped = supervisor.stopSession(sessionId)
         assertEquals(GuestRuntimeSessionState.STOPPED, stopped.state)
+        assertEquals("RUNTIME_SESSION_STOPPED", stopped.diagnosticEvent?.code)
         assertTrue(stopped.guestCodeStarted)
         assertEquals(0, supervisor.activeSessionCount())
         assertEquals(1, native.destroyedSessionCount)
@@ -228,7 +231,43 @@ class GuestRuntimeContextTest {
         assertEquals(GuestRuntimeSessionState.UNSUPPORTED, result.state)
         assertFalse(result.guestCodeStarted)
         assertTrue(result.diagnostic.contains("no armeabi", ignoreCase = true))
+        assertEquals("ARM32_LIBRARY_NOT_FOUND", result.diagnosticEvent?.code)
+        assertEquals("UNSUPPORTED_ABI", result.diagnosticEvent?.category?.name)
         assertEquals(0, native.createdSessionCount)
+    }
+
+    @Test
+    fun reportsTheStageAndUnsupportedOpcodeWhenExecutionStops() {
+        val fixture = newGuestFixture(
+            nativeLibraries = linkedMapOf("lib/armeabi-v7a/libfoo.so" to byteArrayOf(1, 2, 3, 4)),
+        )
+        val native = FakeNativeRuntimeController().apply {
+            executionDiagnostic = "unsupported T16 instruction at guest address 4096 (halfword 61440)"
+        }
+        val result = GuestRuntimeSessionSupervisor(fixture.privateRoot, { 200L }, native)
+            .startGuestRuntimeSession(fixture.request)
+
+        assertEquals(GuestRuntimeSessionState.FAILED, result.state)
+        assertEquals("NATIVE_EXECUTION", result.diagnosticEvent?.operation?.name)
+        assertEquals("UNSUPPORTED_ARM_INSTRUCTION", result.diagnosticEvent?.code)
+        assertEquals("0x1000", result.diagnosticEvent?.guestAddress)
+        assertEquals("0xf000", result.diagnosticEvent?.instruction)
+        assertEquals(1, native.destroyedSessionCount)
+    }
+
+    @Test
+    fun reportsElfInspectionFailuresAtTheCorrectStage() {
+        val fixture = newGuestFixture(
+            nativeLibraries = linkedMapOf("lib/armeabi-v7a/libfoo.so" to byteArrayOf(1, 2, 3, 4)),
+        )
+        val native = FakeNativeRuntimeController().apply { inspectionDiagnostic = "ELF class is not ELF32" }
+        val result = GuestRuntimeSessionSupervisor(fixture.privateRoot, { 300L }, native)
+            .startGuestRuntimeSession(fixture.request)
+
+        assertEquals(GuestRuntimeSessionState.FAILED, result.state)
+        assertEquals("ELF_INSPECTION", result.diagnosticEvent?.operation?.name)
+        assertEquals("ELF_LOAD_OR_RELOCATION_FAILED", result.diagnosticEvent?.code)
+        assertEquals(1, native.destroyedSessionCount)
     }
 
     @Test
@@ -331,6 +370,8 @@ class GuestRuntimeContextTest {
         val loadedFileNames = mutableListOf<String>()
         var createdSessionCount = 0
         var destroyedSessionCount = 0
+        var inspectionDiagnostic: String? = null
+        var executionDiagnostic: String? = null
 
         override fun createSession(context: GuestRuntimeContext): Long {
             createdSessionCount++
@@ -340,7 +381,8 @@ class GuestRuntimeContextTest {
         override fun inspectLibrary(sessionId: Long, libraryPath: String): NativeLibraryMetadata {
             val fileName = Path.of(libraryPath).fileName.toString()
             val dependencies = if (fileName == "libfoo.so") arrayOf("libbar.so") else emptyArray()
-            return NativeLibraryMetadata(true, fileName, fileName, dependencies, "")
+            val diagnostic = inspectionDiagnostic
+            return NativeLibraryMetadata(diagnostic == null, fileName, fileName, dependencies, diagnostic.orEmpty())
         }
 
         override fun loadLibrary(sessionId: Long, libraryPath: String, expectedSha256: String): NativeLoadResult {
@@ -349,16 +391,19 @@ class GuestRuntimeContextTest {
             return NativeLoadResult(true, fileName, 0x40000000L, emptyArray(), "")
         }
 
-        override fun execute(sessionId: Long, instructionBudget: Long) = NativeExecutionReport(
-            success = true,
-            guestInstructions = 123,
-            relocationCount = 4,
-            jniOnLoadVersion = 0x00010006,
-            registeredNativeCount = 2,
-            loadedLibraries = loadedFileNames.toTypedArray(),
-            entrypointResults = arrayOf("libfoo.so!retrobridge_main => 7"),
-            diagnostics = emptyArray(),
-        )
+        override fun execute(sessionId: Long, instructionBudget: Long): NativeExecutionReport {
+            val diagnostic = executionDiagnostic
+            return NativeExecutionReport(
+                success = diagnostic == null,
+                guestInstructions = if (diagnostic == null) 123 else 0,
+                relocationCount = 4,
+                jniOnLoadVersion = 0x00010006,
+                registeredNativeCount = 2,
+                loadedLibraries = loadedFileNames.toTypedArray(),
+                entrypointResults = arrayOf("libfoo.so!retrobridge_main => 7"),
+                diagnostics = if (diagnostic == null) emptyArray() else arrayOf(diagnostic),
+            )
+        }
 
         override fun destroySession(sessionId: Long) {
             destroyedSessionCount++

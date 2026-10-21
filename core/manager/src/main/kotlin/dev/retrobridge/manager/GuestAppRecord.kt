@@ -43,7 +43,47 @@ data class GuestDiagnostic(
     val component: String,
     val message: String,
     val detail: String? = null,
-)
+    val code: String = "UNCLASSIFIED",
+    val category: String = "GENERAL",
+    val operation: String = "UNKNOWN",
+    val guestId: String? = null,
+    val packageName: String? = null,
+    val library: String? = null,
+    val file: String? = null,
+    val symbol: String? = null,
+    val guestAddress: String? = null,
+    val instruction: String? = null,
+    val nextAction: String? = null,
+    val occurrences: Int = 1,
+    val lastOccurredAtEpochMs: Long? = null,
+) {
+    fun validate() {
+        require(timestampEpochMs >= 0) { "Diagnostic timestamp cannot be negative" }
+        require(severity.isNotBlank() && severity.length <= 16) { "Diagnostic severity is invalid" }
+        require(component.isNotBlank() && component.length <= 128) { "Diagnostic component is invalid" }
+        require(message.isNotBlank() && message.length <= 512) { "Diagnostic summary is invalid" }
+        require(detail == null || detail.length <= 4_096) { "Diagnostic detail exceeds its bound" }
+        require(CODE_PATTERN.matches(code) && CODE_PATTERN.matches(category) && CODE_PATTERN.matches(operation)) {
+            "Diagnostic code/category/operation must use stable uppercase identifiers"
+        }
+        require(guestId == null || guestId.length <= 64) { "Diagnostic guest ID exceeds its bound" }
+        require(packageName == null || packageName.length <= 255) { "Diagnostic package name exceeds its bound" }
+        require(library == null || library.length <= 255) { "Diagnostic library name exceeds its bound" }
+        require(file == null || file.length <= 1_024) { "Diagnostic file path exceeds its bound" }
+        require(symbol == null || symbol.length <= 256) { "Diagnostic symbol exceeds its bound" }
+        require(guestAddress == null || guestAddress.length <= 32) { "Diagnostic guest address exceeds its bound" }
+        require(instruction == null || instruction.length <= 64) { "Diagnostic instruction exceeds its bound" }
+        require(nextAction == null || nextAction.length <= 1_024) { "Diagnostic next action exceeds its bound" }
+        require(occurrences in 1..1_000_000) { "Diagnostic occurrence count is outside its bound" }
+        require(lastOccurredAtEpochMs == null || lastOccurredAtEpochMs >= timestampEpochMs) {
+            "Last diagnostic occurrence cannot precede the first occurrence"
+        }
+    }
+
+    companion object {
+        private val CODE_PATTERN = Regex("[A-Z0-9_]{1,64}")
+    }
+}
 
 /** Durable metadata for one imported guest. Paths are relative to RetroBridge's private root. */
 @Serializable
@@ -85,6 +125,8 @@ data class GuestAppRecord(
         splitApkPaths.forEach { requireRelativePath(it, "splitApkPath") }
         obbFiles.forEach { requireRelativePath(it, "obbFile") }
         crashDumpPaths.forEach { requireRelativePath(it, "crashDumpPath") }
+        require(diagnostics.size <= MAX_DIAGNOSTICS_PER_GUEST) { "Guest diagnostic history exceeds its bound" }
+        diagnostics.forEach(GuestDiagnostic::validate)
         require(guestAbis.distinct().size == guestAbis.size) { "guestAbis must not contain duplicates" }
         require(nativeLibraries.keys.all { it in guestAbis }) {
             "Native library catalog contains an ABI not listed in guestAbis"
@@ -104,6 +146,7 @@ data class GuestAppRecord(
     }
 
     companion object {
+        private const val MAX_DIAGNOSTICS_PER_GUEST = 200
         private val APP_ID_PATTERN = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
         private val PACKAGE_PATTERN = Regex("[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)+")
         private val SHA256_PATTERN = Regex("[0-9a-fA-F]{64}")

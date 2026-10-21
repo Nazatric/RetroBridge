@@ -4,6 +4,7 @@ import dev.retrobridge.runtime.GuestRuntimeProtocol
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
@@ -12,12 +13,13 @@ class GuestRuntimeStorageGuardTest {
     fun skipsStopRequestWhenThereIsNoActiveSession() = runBlocking {
         var stopRequested = false
 
-        stopRuntimeSessionForStorageChange(null, GuestRuntimeProtocol.STATE_FAILED) {
+        val result = stopRuntimeSessionForStorageChange(null, GuestRuntimeProtocol.STATE_FAILED) {
             stopRequested = true
             reply(GuestRuntimeProtocol.STATE_STOPPED)
         }
 
         assertFalse(stopRequested)
+        assertNull(result)
     }
 
     @Test
@@ -36,7 +38,8 @@ class GuestRuntimeStorageGuardTest {
     @Test
     fun acceptsConfirmedStoppedAndAlreadyStoppedSessions() = runBlocking {
         listOf(GuestRuntimeProtocol.STATE_STOPPED, GuestRuntimeProtocol.STATE_NOT_RUNNING).forEach { state ->
-            stopRuntimeSessionForStorageChange("session-1", GuestRuntimeProtocol.STATE_RUNNING) { reply(state) }
+            val result = stopRuntimeSessionForStorageChange("session-1", GuestRuntimeProtocol.STATE_RUNNING) { reply(state) }
+            assertEquals(state, result?.state)
         }
     }
 

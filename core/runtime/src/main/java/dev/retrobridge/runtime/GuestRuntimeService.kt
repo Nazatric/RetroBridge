@@ -9,6 +9,9 @@ import android.os.IBinder
 import android.os.Message
 import android.os.Messenger
 import android.os.RemoteException
+import dev.retrobridge.services.DiagnosticOperation
+import dev.retrobridge.services.RuntimeDiagnostic
+import dev.retrobridge.services.RuntimeDiagnosticClassifier
 
 /** Private-process endpoint for bounded ARM32 library loading and interpreter execution. */
 class GuestRuntimeService : Service() {
@@ -64,9 +67,16 @@ class GuestRuntimeService : Service() {
             response.putString(GuestRuntimeProtocol.KEY_SESSION_STATE, GuestRuntimeProtocol.STATE_REJECTED)
             response.putBoolean(GuestRuntimeProtocol.KEY_GUEST_CODE_STARTED, false)
             response.putLong(GuestRuntimeProtocol.KEY_STARTED_AT_EPOCH_MS, 0)
-            response.putString(
-                GuestRuntimeProtocol.KEY_DIAGNOSTIC,
-                (failure.message ?: failure.javaClass.simpleName).take(MAX_DIAGNOSTIC_LENGTH),
+            val rawDiagnostic = (failure.message ?: failure.javaClass.simpleName).take(MAX_DIAGNOSTIC_LENGTH)
+            response.putString(GuestRuntimeProtocol.KEY_DIAGNOSTIC, rawDiagnostic)
+            response.putRuntimeDiagnostic(
+                RuntimeDiagnosticClassifier.failure(
+                    operation = DiagnosticOperation.IPC,
+                    message = rawDiagnostic,
+                    guestId = data.getString(GuestRuntimeProtocol.KEY_GUEST_ID),
+                    packageName = data.getString(GuestRuntimeProtocol.KEY_PACKAGE_NAME),
+                    exceptionType = failure.javaClass.name,
+                ),
             )
         }
         sendResponse(replyTo, response)
@@ -128,6 +138,27 @@ class GuestRuntimeService : Service() {
         response.putInt(GuestRuntimeProtocol.KEY_REGISTERED_NATIVE_COUNT, result.registeredNativeCount)
         response.putStringArray(GuestRuntimeProtocol.KEY_LOADED_LIBRARIES, result.loadedLibraries.take(MAX_REPORTED_ITEMS).toTypedArray())
         response.putStringArray(GuestRuntimeProtocol.KEY_ENTRYPOINT_RESULTS, result.entrypointResults.take(MAX_REPORTED_ITEMS).toTypedArray())
+        response.putRuntimeDiagnostic(result.diagnosticEvent)
+    }
+
+    private fun Bundle.putRuntimeDiagnostic(event: RuntimeDiagnostic?) {
+        if (event == null) return
+        putLong(GuestRuntimeProtocol.KEY_DIAGNOSTIC_TIMESTAMP, event.timestampEpochMs)
+        putString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_SEVERITY, event.severity.name)
+        putString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_CATEGORY, event.category.name)
+        putString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_CODE, event.code)
+        putString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_COMPONENT, event.component.take(128))
+        putString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_OPERATION, event.operation.name)
+        putString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_SUMMARY, event.summary.take(MAX_DIAGNOSTIC_LENGTH))
+        putString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_DETAIL, event.detail?.take(MAX_DIAGNOSTIC_DETAIL_LENGTH))
+        putString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_LIBRARY, event.library?.take(255))
+        putString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_FILE, event.file?.take(1_024))
+        putString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_SYMBOL, event.symbol?.take(256))
+        putString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_GUEST_ADDRESS, event.guestAddress?.take(32))
+        putString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_INSTRUCTION, event.instruction?.take(64))
+        putString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_NEXT_ACTION, event.nextAction?.take(1_024))
+        putString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_GUEST_ID, event.guestId?.take(MAX_GUEST_ID_LENGTH))
+        putString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_PACKAGE_NAME, event.packageName?.take(MAX_PACKAGE_NAME_LENGTH))
     }
 
     private fun sendResponse(replyTo: Messenger, response: Bundle) {
@@ -148,6 +179,7 @@ class GuestRuntimeService : Service() {
         private const val MAX_ABI_NAME_LENGTH = 32
         private const val MAX_ABIS_PER_GUEST = 6
         private const val MAX_DIAGNOSTIC_LENGTH = 512
+        private const val MAX_DIAGNOSTIC_DETAIL_LENGTH = 4_096
         private const val MAX_REPORTED_ITEMS = 64
     }
 }

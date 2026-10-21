@@ -6,6 +6,9 @@ import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.UUID
+import dev.retrobridge.services.DiagnosticOperation
+import dev.retrobridge.services.RuntimeDiagnostic
+import dev.retrobridge.services.RuntimeDiagnosticClassifier
 
 /** Immutable package metadata collected from the imported APK manifest. */
 data class GuestPackageMetadata(
@@ -257,6 +260,7 @@ data class GuestRuntimeSessionResult(
     val registeredNativeCount: Int = 0,
     val loadedLibraries: List<String> = emptyList(),
     val entrypointResults: List<String> = emptyList(),
+    val diagnosticEvent: RuntimeDiagnostic? = null,
 )
 
 /** Owns bounded interpreter sessions in the private runtime process. */
@@ -280,26 +284,41 @@ class GuestRuntimeSessionSupervisor(
         val context = try {
             GuestRuntimeContextFactory.create(privateRoot, request)
         } catch (failure: Exception) {
-            return failureResult(request, failure)
+            return failureResult(request, failure, DiagnosticOperation.GUEST_CONTEXT_VALIDATION)
         }
         val existing = sessions.entries.firstOrNull { it.value.context.guestId == context.guestId }
         if (existing != null) {
             if (existing.value.context.apkSha256 != context.apkSha256) {
-                return failureResult(request, SecurityException("A different APK identity is already running for this guest"))
+                return failureResult(
+                    request,
+                    SecurityException("A different APK identity is already running for this guest"),
+                    DiagnosticOperation.GUEST_CONTEXT_VALIDATION,
+                )
             }
-            return result(existing.key, existing.value, GuestRuntimeSessionState.RUNNING,
-                "ARM32 guest runtime is already active. ${summarize(existing.value.report)}")
+            return result(
+                existing.key,
+                existing.value,
+                GuestRuntimeSessionState.RUNNING,
+                "ARM32 guest runtime is already active. ${summarize(existing.value.report)}",
+            )
         }
         if (sessions.size >= MAX_ACTIVE_SESSIONS) {
-            return failureResult(request, java.io.IOException("Runtime session limit reached"))
+            return failureResult(
+                request,
+                java.io.IOException("Runtime session limit reached"),
+                DiagnosticOperation.SESSION_MANAGEMENT,
+            )
         }
 
         var nativeSessionId = 0L
+        var operation = DiagnosticOperation.NATIVE_LIBRARY_EXTRACTION
         try {
             val extraction = NativeLibraryExtractor.extract(context)
+            operation = DiagnosticOperation.NATIVE_SESSION_INITIALIZATION
             nativeSessionId = nativeController.createSession(context)
             if (nativeSessionId <= 0L) throw IllegalStateException("Native interpreter returned an invalid session handle")
 
+            operation = DiagnosticOperation.ELF_INSPECTION
             val inspected = linkedMapOf<Path, NativeLibraryMetadata>()
             for (library in extraction.libraries) {
                 val metadata = nativeController.inspectLibrary(nativeSessionId, library.path.toString())
@@ -308,7 +327,9 @@ class GuestRuntimeSessionSupervisor(
                 }
                 inspected[library.path] = metadata
             }
+            operation = DiagnosticOperation.DEPENDENCY_RESOLUTION
             val loadOrder = NativeLibraryExtractor.dependencyOrder(extraction.libraries, inspected)
+            operation = DiagnosticOperation.LIBRARY_MAPPING
             for (library in loadOrder) {
                 NativeLibraryExtractor.verifyExtractedFile(library.path, library.sha256, library.size)
                 val loaded = nativeController.loadLibrary(nativeSessionId, library.path.toString(), library.sha256)
@@ -317,6 +338,7 @@ class GuestRuntimeSessionSupervisor(
                 }
             }
 
+            operation = DiagnosticOperation.NATIVE_EXECUTION
             val report = nativeController.execute(nativeSessionId, MAX_GUEST_INSTRUCTIONS)
             if (!report.success || report.guestInstructions <= 0L) {
                 val diagnostic = report.diagnostics.joinToString("; ").ifBlank {
@@ -327,11 +349,15 @@ class GuestRuntimeSessionSupervisor(
             val session = Session(context, nativeSessionId, clock().coerceAtLeast(0L), report)
             val sessionId = UUID.randomUUID().toString()
             sessions[sessionId] = session
-            return result(sessionId, session, GuestRuntimeSessionState.RUNNING,
-                "Interpreter-backed ARM32 native execution completed within budget. ${summarize(report)}")
+            return result(
+                sessionId,
+                session,
+                GuestRuntimeSessionState.RUNNING,
+                "Interpreter-backed ARM32 native execution completed within budget. ${summarize(report)}",
+            )
         } catch (failure: Exception) {
             if (nativeSessionId > 0L) runCatching { nativeController.destroySession(nativeSessionId) }
-            return failureResult(request, failure)
+            return failureResult(request, failure, operation)
         }
     }
 
@@ -346,11 +372,30 @@ class GuestRuntimeSessionSupervisor(
                 guestCodeStarted = false,
                 startedAtEpochMs = 0,
                 diagnostic = "No active ARM32 runtime session matches that ID.",
+                diagnosticEvent = RuntimeDiagnosticClassifier.sessionNotFound(clock()),
             )
-        val teardownDiagnostic = runCatching { nativeController.destroySession(session.nativeSessionId) }
-            .exceptionOrNull()?.let { "; native teardown diagnostic: ${it.message ?: it.javaClass.simpleName}" }.orEmpty()
-        return result(sessionId, session, GuestRuntimeSessionState.STOPPED,
-            "ARM32 interpreter session stopped; bounded guest destructors were requested.$teardownDiagnostic")
+        val teardownFailure = runCatching { nativeController.destroySession(session.nativeSessionId) }.exceptionOrNull()
+        val teardownDiagnostic = teardownFailure?.let {
+            "; native teardown diagnostic: ${it.message ?: it.javaClass.simpleName}"
+        }.orEmpty()
+        val stopped = result(
+            sessionId,
+            session,
+            GuestRuntimeSessionState.STOPPED,
+            "ARM32 interpreter session stopped; bounded guest destructors were requested.$teardownDiagnostic",
+        )
+        return teardownFailure?.let { failure ->
+            stopped.copy(
+                diagnosticEvent = RuntimeDiagnosticClassifier.failure(
+                    operation = DiagnosticOperation.RUNTIME_STOP,
+                    message = failure.message ?: failure.javaClass.simpleName,
+                    guestId = session.context.guestId,
+                    packageName = session.context.packageName,
+                    exceptionType = failure.javaClass.name,
+                    timestampEpochMs = clock(),
+                ),
+            )
+        } ?: stopped
     }
 
     @Synchronized
@@ -364,10 +409,22 @@ class GuestRuntimeSessionSupervisor(
         sessions.clear()
     }
 
-    private fun failureResult(request: GuestRuntimeContextRequest, failure: Exception): GuestRuntimeSessionResult {
+    private fun failureResult(
+        request: GuestRuntimeContextRequest,
+        failure: Exception,
+        operation: DiagnosticOperation,
+    ): GuestRuntimeSessionResult {
         val unsupported = failure is java.io.IOException &&
             (failure.message.orEmpty().contains("no armeabi", ignoreCase = true)
                 || failure.message.orEmpty().contains("no ARM32", ignoreCase = true))
+        val event = RuntimeDiagnosticClassifier.failure(
+            operation = operation,
+            message = failure.message ?: failure.javaClass.simpleName,
+            guestId = request.guestId,
+            packageName = request.packageName,
+            exceptionType = failure.javaClass.name,
+            timestampEpochMs = clock(),
+        )
         return GuestRuntimeSessionResult(
             sessionId = null,
             guestId = request.guestId.take(64),
@@ -382,6 +439,7 @@ class GuestRuntimeSessionSupervisor(
             registeredNativeCount = (failure as? NativeExecutionFailure)?.report?.registeredNativeCount ?: 0,
             loadedLibraries = (failure as? NativeExecutionFailure)?.report?.loadedLibraries?.toList().orEmpty(),
             entrypointResults = (failure as? NativeExecutionFailure)?.report?.entrypointResults?.toList().orEmpty(),
+            diagnosticEvent = event,
         )
     }
 
@@ -413,6 +471,22 @@ class GuestRuntimeSessionSupervisor(
         registeredNativeCount = session.report.registeredNativeCount,
         loadedLibraries = session.report.loadedLibraries.toList(),
         entrypointResults = session.report.entrypointResults.toList(),
+        diagnosticEvent = when (state) {
+            GuestRuntimeSessionState.RUNNING -> RuntimeDiagnosticClassifier.sessionRunning(
+                guestId = session.context.guestId,
+                packageName = session.context.packageName,
+                timestampEpochMs = clock(),
+                instructions = session.report.guestInstructions,
+                libraries = session.report.loadedLibraries,
+            )
+            GuestRuntimeSessionState.STOPPED -> RuntimeDiagnosticClassifier.sessionStopped(
+                guestId = session.context.guestId,
+                packageName = session.context.packageName,
+                timestampEpochMs = clock(),
+                detail = diagnostic,
+            )
+            else -> null
+        },
     )
 
     private class NativeExecutionFailure(

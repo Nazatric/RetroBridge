@@ -13,6 +13,10 @@ import android.os.Messenger
 import android.os.RemoteException
 import dev.retrobridge.manager.GuestAppRecord
 import dev.retrobridge.runtime.GuestRuntimeProtocol
+import dev.retrobridge.services.DiagnosticCategory
+import dev.retrobridge.services.DiagnosticOperation
+import dev.retrobridge.services.DiagnosticSeverity
+import dev.retrobridge.services.RuntimeDiagnostic
 import java.io.Closeable
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -162,7 +166,37 @@ class GuestRuntimeClient(context: Context) : Closeable {
         registeredNativeCount = bundle.getInt(GuestRuntimeProtocol.KEY_REGISTERED_NATIVE_COUNT, 0),
         loadedLibraries = bundle.getStringArray(GuestRuntimeProtocol.KEY_LOADED_LIBRARIES)?.toList().orEmpty(),
         entrypointResults = bundle.getStringArray(GuestRuntimeProtocol.KEY_ENTRYPOINT_RESULTS)?.toList().orEmpty(),
+        diagnosticEvent = bundle.readRuntimeDiagnostic(),
     )
+
+    private fun Bundle.readRuntimeDiagnostic(): RuntimeDiagnostic? {
+        val severity = getString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_SEVERITY)
+            ?.let { name -> DiagnosticSeverity.values().firstOrNull { it.name == name } } ?: return null
+        val category = getString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_CATEGORY)
+            ?.let { name -> DiagnosticCategory.values().firstOrNull { it.name == name } } ?: return null
+        val operation = getString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_OPERATION)
+            ?.let { name -> DiagnosticOperation.values().firstOrNull { it.name == name } } ?: return null
+        val code = getString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_CODE)?.takeIf(String::isNotBlank) ?: return null
+        val summary = getString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_SUMMARY)?.takeIf(String::isNotBlank) ?: return null
+        return RuntimeDiagnostic(
+            timestampEpochMs = getLong(GuestRuntimeProtocol.KEY_DIAGNOSTIC_TIMESTAMP, 0).coerceAtLeast(0L),
+            severity = severity,
+            category = category,
+            code = code.take(64),
+            component = getString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_COMPONENT).orEmpty().take(128),
+            operation = operation,
+            summary = summary.take(512),
+            detail = getString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_DETAIL)?.take(4_096),
+            guestId = getString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_GUEST_ID)?.take(64),
+            packageName = getString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_PACKAGE_NAME)?.take(255),
+            library = getString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_LIBRARY)?.take(255),
+            file = getString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_FILE)?.take(1_024),
+            symbol = getString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_SYMBOL)?.take(256),
+            guestAddress = getString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_GUEST_ADDRESS)?.take(32),
+            instruction = getString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_INSTRUCTION)?.take(64),
+            nextAction = getString(GuestRuntimeProtocol.KEY_DIAGNOSTIC_NEXT_ACTION)?.take(1_024),
+        )
+    }
 
     override fun close() {
         val pendingFailure = IllegalStateException("Runtime client was closed")
@@ -201,6 +235,7 @@ data class GuestRuntimeSessionReply(
     val registeredNativeCount: Int,
     val loadedLibraries: List<String>,
     val entrypointResults: List<String>,
+    val diagnosticEvent: RuntimeDiagnostic? = null,
 )
 
 /** Fail closed before destructive storage changes unless the runtime confirms it has stopped. */
@@ -208,12 +243,12 @@ internal suspend fun stopRuntimeSessionForStorageChange(
     sessionId: String?,
     runtimeState: String,
     stopSession: suspend (String) -> GuestRuntimeSessionReply,
-) {
+): GuestRuntimeSessionReply? {
     if (sessionId == null) {
         check(runtimeState != GuestRuntimeProtocol.STATE_RUNNING) {
             "Runtime reports an active session without a stoppable session ID"
         }
-        return
+        return null
     }
     val reply = stopSession(sessionId)
     if (reply.state != GuestRuntimeProtocol.STATE_STOPPED &&
@@ -221,4 +256,5 @@ internal suspend fun stopRuntimeSessionForStorageChange(
     ) {
         throw IllegalStateException(reply.diagnostic.ifBlank { "Runtime did not confirm that the session stopped" })
     }
+    return reply
 }

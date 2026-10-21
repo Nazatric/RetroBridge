@@ -49,14 +49,24 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import dev.retrobridge.fs.StorageBreakdown
+import dev.retrobridge.manager.FileGuestDiagnosticRepository
 import dev.retrobridge.manager.GuestAppRecord
+import dev.retrobridge.manager.GuestDiagnostic
+import dev.retrobridge.manager.GuestDiagnosticJson
+import dev.retrobridge.manager.LaunchRecord
 import dev.retrobridge.services.Capability
 import dev.retrobridge.services.CapabilityStatus
 import dev.retrobridge.services.CompatibilityReport
+import dev.retrobridge.services.DiagnosticCategory
+import dev.retrobridge.services.DiagnosticOperation
+import dev.retrobridge.services.DiagnosticSeverity
+import dev.retrobridge.services.RuntimeDiagnostic
+import dev.retrobridge.services.RuntimeDiagnosticClassifier
 import dev.retrobridge.runtime.GuestRuntimeProtocol
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import java.nio.file.Files
 
@@ -70,12 +80,25 @@ class MainActivity : ComponentActivity() {
         val privateRoot = filesDir.toPath().resolve("RetroBridge")
         val repositoryResult = runCatching {
             Files.createDirectories(privateRoot)
-            dev.retrobridge.manager.FileGuestAppRepository(privateRoot.resolve("registry.json"))
+            dev.retrobridge.manager.FileGuestAppRepository(privateRoot.resolve("registry.json")).let { repo ->
+                repo to repo.list()
+            }
         }
-        val repository = repositoryResult.getOrNull()
+        val repository = repositoryResult.getOrNull()?.first
         val importer = repository?.let { ApkImporter(this, privateRoot, it) }
-        val initialRecords = runCatching { repository?.list().orEmpty() }.getOrDefault(emptyList())
-        val registryProblem = repositoryResult.exceptionOrNull()?.message
+        val initialRecords = repositoryResult.getOrNull()?.second.orEmpty()
+        val registryProblem = repositoryResult.exceptionOrNull()?.let { it.message ?: it.javaClass.simpleName }
+        val diagnosticRepositoryResult = runCatching {
+            Files.createDirectories(privateRoot)
+            FileGuestDiagnosticRepository(privateRoot.resolve("diagnostics.json"))
+        }
+        val diagnosticRepository = diagnosticRepositoryResult.getOrNull()
+        val diagnosticLoadResult = runCatching { diagnosticRepository?.list().orEmpty() }
+        val initialDiagnosticEvents = diagnosticLoadResult.getOrDefault(emptyList())
+        val diagnosticStoreProblem = diagnosticRepositoryResult.exceptionOrNull()?.let {
+            (it.message ?: it.javaClass.simpleName).take(512)
+        } ?: diagnosticLoadResult.exceptionOrNull()?.let { (it.message ?: it.javaClass.simpleName).take(512) }
+            ?: if (diagnosticRepository == null) "Diagnostic history is unavailable; new events will be kept only in memory." else null
 
         setContent {
             MaterialTheme(
@@ -88,11 +111,20 @@ class MainActivity : ComponentActivity() {
                 val apps = remember {
                     mutableStateListOf<GuestAppRecord>().apply { addAll(initialRecords) }
                 }
+                val diagnosticEvents = remember {
+                    mutableStateListOf<GuestDiagnostic>().apply { addAll(initialDiagnosticEvents) }
+                }
+                val pendingDiagnosticEvents = remember { mutableListOf<GuestDiagnostic>() }
+                val diagnosticWriteMutex = remember { Mutex() }
                 val snackbarHostState = remember { SnackbarHostState() }
                 val scope = rememberCoroutineScope()
                 val runtimeSessions = remember { mutableStateMapOf<String, RuntimeSessionUi>() }
                 var operationBusy by remember { mutableStateOf(false) }
                 var selectedId by remember { mutableStateOf<String?>(null) }
+                var diagnosticsOpen by remember { mutableStateOf(false) }
+                var diagnosticsGuestFilter by remember { mutableStateOf<String?>(null) }
+                var diagnosticExportSnapshot by remember { mutableStateOf(emptyList<GuestDiagnostic>()) }
+                var diagnosticStorageProblem by remember { mutableStateOf(diagnosticStoreProblem) }
                 var storage by remember { mutableStateOf<StorageBreakdown?>(null) }
                 var storageRefresh by remember { mutableIntStateOf(0) }
                 val selected = apps.firstOrNull { it.id == selectedId }
@@ -100,6 +132,36 @@ class MainActivity : ComponentActivity() {
                 suspend fun showOperationResult(message: String) {
                     operationBusy = false
                     snackbarHostState.showSnackbar(message)
+                }
+
+                suspend fun recordDiagnostic(event: GuestDiagnostic) {
+                    diagnosticWriteMutex.lock()
+                    try {
+                        val pending = pendingDiagnosticEvents.toList()
+                        val unavailableReason = diagnosticStorageProblem
+                        val saved = try {
+                            withContext(Dispatchers.IO) {
+                                val store = diagnosticRepository
+                                    ?: throw IllegalStateException(unavailableReason ?: "Diagnostic history is unavailable")
+                                store.appendAll(pending + event)
+                            }
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (failure: Exception) {
+                            diagnosticStorageProblem = (failure.message ?: failure.javaClass.simpleName).take(512)
+                            pendingDiagnosticEvents.add(event)
+                            diagnosticEvents.add(event)
+                            while (diagnosticEvents.size > 500) diagnosticEvents.removeAt(0)
+                            while (pendingDiagnosticEvents.size > 500) pendingDiagnosticEvents.removeAt(0)
+                            return
+                        }
+                        pendingDiagnosticEvents.clear()
+                        diagnosticEvents.clear()
+                        diagnosticEvents.addAll(saved)
+                        diagnosticStorageProblem = null
+                    } finally {
+                        diagnosticWriteMutex.unlock()
+                    }
                 }
 
                 LaunchedEffect(selected?.id, storageRefresh) {
@@ -129,11 +191,18 @@ class MainActivity : ComponentActivity() {
                                 apps.removeAll { it.id == imported.id }
                                 apps.add(0, imported)
                                 selectedId = imported.id
-                                showOperationResult("Imported ${imported.displayName}. Launch will attempt bounded ARM32 native execution when supported libraries are present.")
+                                recordDiagnostic(apkImportedDiagnostic(imported).toStoredDiagnostic())
+                                showOperationResult("Imported ${imported.displayName}. Native launchability is not established by import or preflight.")
                             } catch (cancelled: CancellationException) {
                                 throw cancelled
                             } catch (failure: Exception) {
-                                showOperationResult("Import failed: ${failure.message ?: "unknown error"}")
+                                val event = RuntimeDiagnosticClassifier.failure(
+                                    operation = DiagnosticOperation.APK_IMPORT,
+                                    message = failure.message ?: failure.javaClass.simpleName,
+                                    exceptionType = failure.javaClass.name,
+                                )
+                                recordDiagnostic(event.toStoredDiagnostic())
+                                showOperationResult(event.summary)
                             } finally {
                                 operationBusy = false
                             }
@@ -146,6 +215,42 @@ class MainActivity : ComponentActivity() {
                     if (index >= 0) apps[index] = record
                 }
 
+                suspend fun persistLaunchOutcome(
+                    target: GuestAppRecord,
+                    state: String,
+                    startedAtEpochMs: Long,
+                    event: GuestDiagnostic,
+                ) {
+                    val store = repository ?: return
+                    try {
+                        val updated = withContext(Dispatchers.IO) {
+                            store.update(target.id) { current ->
+                                val now = maxOf(event.timestampEpochMs, current.updatedAtEpochMs)
+                                val outcome = if (state == GuestRuntimeProtocol.STATE_RUNNING) {
+                                    "NATIVE_ENTRYPOINTS_COMPLETED"
+                                } else {
+                                    state
+                                }
+                                val history = current.launchHistory + LaunchRecord(
+                                    startedAtEpochMs = startedAtEpochMs.takeIf { it > 0L } ?: now,
+                                    endedAtEpochMs = now,
+                                    outcome = outcome,
+                                    diagnostic = event.message,
+                                )
+                                current.copy(
+                                    launchHistory = history.takeLast(200),
+                                    updatedAtEpochMs = now,
+                                )
+                            }
+                        }
+                        replaceRecord(updated)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (failure: Exception) {
+                        diagnosticStorageProblem = (failure.message ?: failure.javaClass.simpleName).take(512)
+                    }
+                }
+
                 fun startRuntimeSession(target: GuestAppRecord) {
                     if (operationBusy || runtimeSessions[target.id]?.sessionId != null) return
                     operationBusy = true
@@ -153,17 +258,46 @@ class MainActivity : ComponentActivity() {
                         try {
                             val result = runtimeClient.launchGuestRuntime(target)
                             runtimeSessions[target.id] = RuntimeSessionUi.from(result)
+                            val event = result.diagnosticEvent ?: if (result.state == GuestRuntimeProtocol.STATE_RUNNING) {
+                                RuntimeDiagnosticClassifier.sessionRunning(
+                                    guestId = target.id,
+                                    packageName = target.packageName,
+                                    timestampEpochMs = result.startedAtEpochMs,
+                                    instructions = result.guestInstructions,
+                                    libraries = result.loadedLibraries,
+                                )
+                            } else {
+                                RuntimeDiagnosticClassifier.failure(
+                                    operation = DiagnosticOperation.NATIVE_EXECUTION,
+                                    message = result.diagnostic,
+                                    guestId = target.id,
+                                    packageName = target.packageName,
+                                )
+                            }
+                            val storedEvent = event.toStoredDiagnostic()
+                            recordDiagnostic(storedEvent)
+                            persistLaunchOutcome(target, result.state, result.startedAtEpochMs, storedEvent)
                             if (result.state != GuestRuntimeProtocol.STATE_RUNNING || result.sessionId == null) {
-                                showOperationResult("Guest runtime did not launch: ${result.diagnostic}")
+                                showOperationResult(event.summary)
                             } else {
                                 showOperationResult(
-                                    "ARM32 native code executed: ${result.guestInstructions} instructions across ${result.loadedLibraries.size} library/libraries.",
+                                    "Selected ARM32 native entrypoints completed (${result.guestInstructions} instructions). This does not verify full APK/game compatibility.",
                                 )
                             }
                         } catch (cancelled: CancellationException) {
                             throw cancelled
                         } catch (failure: Exception) {
-                            showOperationResult("Guest runtime launch failed: ${failure.message ?: "unknown error"}")
+                            val event = RuntimeDiagnosticClassifier.failure(
+                                operation = DiagnosticOperation.IPC,
+                                message = failure.message ?: failure.javaClass.simpleName,
+                                guestId = target.id,
+                                packageName = target.packageName,
+                                exceptionType = failure.javaClass.name,
+                            )
+                            val storedEvent = event.toStoredDiagnostic()
+                            recordDiagnostic(storedEvent)
+                            persistLaunchOutcome(target, GuestRuntimeProtocol.STATE_FAILED, 0L, storedEvent)
+                            showOperationResult(event.summary)
                         } finally {
                             operationBusy = false
                         }
@@ -183,11 +317,29 @@ class MainActivity : ComponentActivity() {
                             ) {
                                 runtimeSessions.remove(target.id)
                             }
-                            showOperationResult(result.diagnostic)
+                            val event = result.diagnosticEvent ?: RuntimeDiagnosticClassifier.failure(
+                                operation = DiagnosticOperation.RUNTIME_STOP,
+                                message = result.diagnostic,
+                                guestId = target.id,
+                                packageName = target.packageName,
+                            )
+                            val storedEvent = event.toStoredDiagnostic()
+                            recordDiagnostic(storedEvent)
+                            persistLaunchOutcome(target, result.state, result.startedAtEpochMs, storedEvent)
+                            showOperationResult(event.summary)
                         } catch (cancelled: CancellationException) {
                             throw cancelled
                         } catch (failure: Exception) {
-                            showOperationResult("Runtime stop failed: ${failure.message ?: "unknown error"}")
+                            val event = RuntimeDiagnosticClassifier.failure(
+                                operation = DiagnosticOperation.RUNTIME_STOP,
+                                message = failure.message ?: failure.javaClass.simpleName,
+                                guestId = target.id,
+                                packageName = target.packageName,
+                                exceptionType = failure.javaClass.name,
+                            )
+                            val storedEvent = event.toStoredDiagnostic()
+                            recordDiagnostic(storedEvent)
+                            showOperationResult(event.summary)
                         } finally {
                             operationBusy = false
                         }
@@ -196,8 +348,27 @@ class MainActivity : ComponentActivity() {
 
                 suspend fun stopRuntimeSessionBeforeStorageChange(target: GuestAppRecord) {
                     val current = runtimeSessions[target.id] ?: return
-                    stopRuntimeSessionForStorageChange(current.sessionId, current.state, runtimeClient::stopSession)
+                    val reply = stopRuntimeSessionForStorageChange(
+                        current.sessionId,
+                        current.state,
+                        runtimeClient::stopSession,
+                    )
                     runtimeSessions.remove(target.id)
+                    if (reply != null) {
+                        val event = reply.diagnosticEvent ?: if (reply.state == GuestRuntimeProtocol.STATE_STOPPED) {
+                            RuntimeDiagnosticClassifier.sessionStopped(
+                                guestId = target.id,
+                                packageName = target.packageName,
+                                timestampEpochMs = System.currentTimeMillis(),
+                                detail = reply.diagnostic,
+                            )
+                        } else {
+                            RuntimeDiagnosticClassifier.sessionNotFound(System.currentTimeMillis())
+                        }
+                        val storedEvent = event.toStoredDiagnostic()
+                        recordDiagnostic(storedEvent)
+                        persistLaunchOutcome(target, reply.state, reply.startedAtEpochMs, storedEvent)
+                    }
                 }
 
                 val dataArchivePicker = rememberLauncherForActivityResult(
@@ -217,13 +388,30 @@ class MainActivity : ComponentActivity() {
                                 }
                                 replaceRecord(updated)
                                 storageRefresh += 1
+                                recordDiagnostic(
+                                    storageDiagnostic(
+                                        target,
+                                        DiagnosticOperation.DATA_IMPORT,
+                                        "DATA_ARCHIVE_IMPORTED",
+                                        "App data archive imported.",
+                                        "${result.filesImported} files; ${result.uncompressedBytes} uncompressed bytes.",
+                                    ).toStoredDiagnostic(),
+                                )
                                 showOperationResult(
                                     "Imported ${result.filesImported} data files (${formatBytes(result.uncompressedBytes)}).",
                                 )
                             } catch (cancelled: CancellationException) {
                                 throw cancelled
                             } catch (failure: Exception) {
-                                showOperationResult("Data ZIP import failed: ${failure.message ?: "unknown error"}")
+                                val event = RuntimeDiagnosticClassifier.failure(
+                                    DiagnosticOperation.DATA_IMPORT,
+                                    failure.message ?: failure.javaClass.simpleName,
+                                    guestId = target.id,
+                                    packageName = target.packageName,
+                                    exceptionType = failure.javaClass.name,
+                                )
+                                recordDiagnostic(event.toStoredDiagnostic())
+                                showOperationResult(event.summary)
                             } finally {
                                 operationBusy = false
                             }
@@ -255,13 +443,30 @@ class MainActivity : ComponentActivity() {
                                 }
                                 replaceRecord(updated)
                                 storageRefresh += 1
+                                recordDiagnostic(
+                                    storageDiagnostic(
+                                        target,
+                                        DiagnosticOperation.OBB_IMPORT,
+                                        "OBB_CONTENT_IMPORTED",
+                                        "OBB content imported into app-private storage.",
+                                        "${result.paths.size} file(s); ${result.bytesImported} bytes.",
+                                    ).toStoredDiagnostic(),
+                                )
                                 showOperationResult(
                                     "Imported ${result.paths.size} OBB file(s) (${formatBytes(result.bytesImported)}).",
                                 )
                             } catch (cancelled: CancellationException) {
                                 throw cancelled
                             } catch (failure: Exception) {
-                                showOperationResult("OBB import failed: ${failure.message ?: "unknown error"}")
+                                val event = RuntimeDiagnosticClassifier.failure(
+                                    DiagnosticOperation.OBB_IMPORT,
+                                    failure.message ?: failure.javaClass.simpleName,
+                                    guestId = target.id,
+                                    packageName = target.packageName,
+                                    exceptionType = failure.javaClass.name,
+                                )
+                                recordDiagnostic(event.toStoredDiagnostic())
+                                showOperationResult(event.summary)
                             } finally {
                                 operationBusy = false
                             }
@@ -284,13 +489,30 @@ class MainActivity : ComponentActivity() {
                                         ?: error("Unable to create the destination ZIP")
                                     output.use { manager.exportGuestData(target, it) }
                                 }
+                                recordDiagnostic(
+                                    storageDiagnostic(
+                                        target,
+                                        DiagnosticOperation.DATA_EXPORT,
+                                        "DATA_EXPORT_COMPLETED",
+                                        "Guest data export completed.",
+                                        "${result.filesExported} file(s); ${result.bytesExported} bytes.",
+                                    ).toStoredDiagnostic(),
+                                )
                                 showOperationResult(
                                     "Exported ${result.filesExported} files (${formatBytes(result.bytesExported)}).",
                                 )
                             } catch (cancelled: CancellationException) {
                                 throw cancelled
                             } catch (failure: Exception) {
-                                showOperationResult("Export failed: ${failure.message ?: "unknown error"}")
+                                val event = RuntimeDiagnosticClassifier.failure(
+                                    DiagnosticOperation.DATA_EXPORT,
+                                    failure.message ?: failure.javaClass.simpleName,
+                                    guestId = target.id,
+                                    packageName = target.packageName,
+                                    exceptionType = failure.javaClass.name,
+                                )
+                                recordDiagnostic(event.toStoredDiagnostic())
+                                showOperationResult(event.summary)
                             } finally {
                                 operationBusy = false
                             }
@@ -298,14 +520,58 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                val diagnosticExportPicker = rememberLauncherForActivityResult(
+                    ActivityResultContracts.CreateDocument("application/json"),
+                ) { uri: Uri? ->
+                    if (uri != null) scope.launch {
+                        try {
+                            withContext(Dispatchers.IO) {
+                                val output = contentResolver.openOutputStream(uri)
+                                    ?: error("Unable to create the diagnostic report")
+                                output.use { it.write(GuestDiagnosticJson.encode(diagnosticExportSnapshot).toByteArray(Charsets.UTF_8)) }
+                            }
+                            showOperationResult("Exported ${diagnosticExportSnapshot.size} diagnostic event group(s) as JSON.")
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (failure: Exception) {
+                            val event = RuntimeDiagnosticClassifier.failure(
+                                DiagnosticOperation.DIAGNOSTIC_EXPORT,
+                                failure.message ?: failure.javaClass.simpleName,
+                                exceptionType = failure.javaClass.name,
+                            )
+                            recordDiagnostic(event.toStoredDiagnostic())
+                            showOperationResult(event.summary)
+                        }
+                    }
+                }
+
                 Scaffold(snackbarHost = { SnackbarHost(snackbarHostState) }) { padding ->
-                    if (selected == null) {
+                    val combinedDiagnostics = (diagnosticEvents.toList() + apps.flatMap(GuestAppRecord::diagnostics)).distinct()
+                    if (diagnosticsOpen) {
+                        DiagnosticsScreen(
+                            modifier = Modifier.padding(padding),
+                            events = combinedDiagnostics,
+                            apps = apps,
+                            initialGuestId = diagnosticsGuestFilter,
+                            storageProblem = diagnosticStorageProblem,
+                            onBack = { diagnosticsOpen = false },
+                            onExport = { snapshot ->
+                                diagnosticExportSnapshot = snapshot.toList()
+                                diagnosticExportPicker.launch("retrobridge-diagnostics.json")
+                            },
+                        )
+                    } else if (selected == null) {
                         AppListScreen(
                             modifier = Modifier.padding(padding),
                             apps = apps,
                             registryProblem = registryProblem,
+                            diagnosticCount = combinedDiagnostics.size,
                             canImport = importer != null,
                             operationBusy = operationBusy,
+                            onDiagnostics = {
+                                diagnosticsGuestFilter = null
+                                diagnosticsOpen = true
+                            },
                             onImport = {
                                 if (importer == null) {
                                     scope.launch {
@@ -326,6 +592,10 @@ class MainActivity : ComponentActivity() {
                             operationBusy = operationBusy,
                             onStartRuntimeSession = { startRuntimeSession(selected) },
                             onStopRuntimeSession = { stopRuntimeSession(selected) },
+                            onDiagnostics = {
+                                diagnosticsGuestFilter = selected.id
+                                diagnosticsOpen = true
+                            },
                             onBack = { selectedId = null },
                             onAttachData = {
                                 dataArchivePicker.launch(arrayOf("application/zip", "application/x-zip-compressed", "*/*"))
@@ -346,11 +616,28 @@ class MainActivity : ComponentActivity() {
                                                 importer?.clearData(selected) ?: error("Registry is unavailable")
                                             }
                                             storageRefresh += 1
+                                            recordDiagnostic(
+                                                storageDiagnostic(
+                                                    selected,
+                                                    DiagnosticOperation.DATA_CLEAR,
+                                                    "GUEST_DATA_CLEARED",
+                                                    "Guest-owned data cleared; the imported APK and OBB files were retained.",
+                                                    "Internal and app-specific external data directories were cleared.",
+                                                ).toStoredDiagnostic(),
+                                            )
                                             showOperationResult("Cleared guest-owned data. The imported APK and OBB files were retained.")
                                         } catch (cancelled: CancellationException) {
                                             throw cancelled
                                         } catch (failure: Exception) {
-                                            showOperationResult("Clear Data failed: ${failure.message ?: "unknown error"}")
+                                            val event = RuntimeDiagnosticClassifier.failure(
+                                                DiagnosticOperation.DATA_CLEAR,
+                                                failure.message ?: failure.javaClass.simpleName,
+                                                guestId = selected.id,
+                                                packageName = selected.packageName,
+                                                exceptionType = failure.javaClass.name,
+                                            )
+                                            recordDiagnostic(event.toStoredDiagnostic())
+                                            showOperationResult(event.summary)
                                         } finally {
                                             operationBusy = false
                                         }
@@ -369,11 +656,28 @@ class MainActivity : ComponentActivity() {
                                             apps.removeAll { it.id == selected.id }
                                             selectedId = null
                                             storage = null
+                                            recordDiagnostic(
+                                                storageDiagnostic(
+                                                    selected,
+                                                    DiagnosticOperation.APP_REMOVE,
+                                                    "GUEST_APP_REMOVED",
+                                                    "Imported guest removed from RetroBridge.",
+                                                    "Only this guest's app-private files and registry entry were removed.",
+                                                ).toStoredDiagnostic(),
+                                            )
                                             showOperationResult("Removed ${selected.displayName} from RetroBridge.")
                                         } catch (cancelled: CancellationException) {
                                             throw cancelled
                                         } catch (failure: Exception) {
-                                            showOperationResult("Remove failed: ${failure.message ?: "unknown error"}")
+                                            val event = RuntimeDiagnosticClassifier.failure(
+                                                DiagnosticOperation.APP_REMOVE,
+                                                failure.message ?: failure.javaClass.simpleName,
+                                                guestId = selected.id,
+                                                packageName = selected.packageName,
+                                                exceptionType = failure.javaClass.name,
+                                            )
+                                            recordDiagnostic(event.toStoredDiagnostic())
+                                            showOperationResult(event.summary)
                                         } finally {
                                             operationBusy = false
                                         }
@@ -411,11 +715,14 @@ private fun AppListScreen(
     modifier: Modifier,
     apps: List<GuestAppRecord>,
     registryProblem: String?,
+    diagnosticCount: Int,
     canImport: Boolean,
     operationBusy: Boolean,
+    onDiagnostics: () -> Unit,
     onImport: () -> Unit,
     onSelect: (GuestAppRecord) -> Unit,
 ) {
+    var compatibilityExpanded by remember { mutableStateOf(false) }
     Column(
         modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -430,6 +737,9 @@ private fun AppListScreen(
             WarningCard("Registry could not be opened", registryProblem)
         }
         if (operationBusy) OperationProgress()
+        OutlinedButton(onClick = onDiagnostics, modifier = Modifier.fillMaxWidth()) {
+            Text("Diagnostics ($diagnosticCount)")
+        }
         Button(
             onClick = onImport,
             enabled = canImport && !operationBusy,
@@ -453,14 +763,18 @@ private fun AppListScreen(
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(record.displayName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                         Text(record.packageName, style = MaterialTheme.typography.bodySmall)
-                        Text("State: ${record.state.name.lowercase()} · Bundled ABI folder(s): ${record.guestAbis.joinToString().ifBlank { "none detected" }}")
+                        Text("Imported · native loadability not verified", style = MaterialTheme.typography.labelMedium)
+                        Text("Lifecycle: ${record.state.name.lowercase()} · Bundled ABI folder(s): ${record.guestAbis.joinToString().ifBlank { "none detected" }}")
                     }
                 }
             }
         }
         HorizontalDivider()
         Text("Current compatibility", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-        CompatibilityReport.capabilities.forEach { CapabilityRow(it) }
+        TextButton(onClick = { compatibilityExpanded = !compatibilityExpanded }) {
+            Text(if (compatibilityExpanded) "Hide capability inventory" else "Show capability inventory")
+        }
+        if (compatibilityExpanded) CompatibilityReport.capabilities.forEach { CapabilityRow(it) }
     }
 }
 
@@ -473,6 +787,7 @@ private fun AppDetailsScreen(
     operationBusy: Boolean,
     onStartRuntimeSession: () -> Unit,
     onStopRuntimeSession: () -> Unit,
+    onDiagnostics: () -> Unit,
     onBack: () -> Unit,
     onAttachData: () -> Unit,
     onAttachObb: () -> Unit,
@@ -481,6 +796,7 @@ private fun AppDetailsScreen(
     onRemove: () -> Unit,
 ) {
     var pendingAction by remember(record.id) { mutableStateOf<PendingAction?>(null) }
+    var compatibilityExpanded by remember(record.id) { mutableStateOf(false) }
     if (pendingAction != null) {
         val action = pendingAction!!
         AlertDialog(
@@ -511,20 +827,38 @@ private fun AppDetailsScreen(
     ) {
         TextButton(onClick = onBack) { Text("← All applications") }
         Text(record.displayName, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        WarningCard(
+            title = "Imported · native launch not verified",
+            body = "APK metadata and ELF preflight are inspection results only. No Ready state is inferred without verified dependencies and a completed selected runtime path.",
+        )
         InfoRow("Package", record.packageName)
         InfoRow("Version", "${record.versionName ?: "unknown"} (${record.versionCode})")
         InfoRow("SDK range", "min ${record.minSdk ?: "unknown"} · target ${record.targetSdk ?: "unknown"}")
         InfoRow("Bundled native ABI folders", record.guestAbis.joinToString().ifBlank { "None detected" })
         InfoRow("Native ELF preflight", "Structural metadata only; not proof of library loadability")
-        InfoRow(
-            "Bundled native libraries",
-            record.nativeLibraries.toSortedMap().entries.joinToString("; ") { (abi, names) -> "$abi: ${names.joinToString()}" }
-                .ifBlank { "None detected" },
-        )
+        Text("Bundled native libraries", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+        if (record.nativeLibraries.isEmpty()) {
+            Text("None detected")
+        } else {
+            record.nativeLibraries.toSortedMap().forEach { (abi, names) ->
+                InfoRow(
+                    "ABI $abi",
+                    names.take(20).joinToString().let { listed ->
+                        if (names.size > 20) "$listed … (${names.size} total)" else listed
+                    },
+                )
+            }
+        }
         InfoRow("Lifecycle", record.state.name.lowercase())
         InfoRow(
+            "Last runtime outcome",
+            record.launchHistory.lastOrNull()?.let { latest ->
+                "${latest.outcome.lowercase().replace('_', ' ')}${latest.diagnostic?.let { ": $it" }.orEmpty()}"
+            } ?: "Not attempted",
+        )
+        InfoRow(
             "Guest runtime",
-            runtimeSession?.state ?: "Not active",
+            runtimeSession?.state ?: "Not queried in this screen (session state is service-owned)",
         )
         runtimeSession?.sessionId?.let { InfoRow("Runtime session", it) }
         runtimeSession?.let { InfoRow("Guest code executed", if (it.guestCodeStarted) "Yes" else "No") }
@@ -539,7 +873,8 @@ private fun AppDetailsScreen(
         runtimeSession?.takeIf { it.entrypointResults.isNotEmpty() }?.let {
             InfoRow("Native entrypoints", it.entrypointResults.joinToString("; "))
         }
-        runtimeSession?.let { InfoRow("Runtime diagnostic", it.diagnostic) }
+        runtimeSession?.diagnosticEvent?.let { InfoRow("Latest runtime outcome", it.summary) }
+        OutlinedButton(onClick = onDiagnostics, modifier = Modifier.fillMaxWidth()) { Text("View diagnostics") }
         InfoRow("APK SHA-256", record.sha256)
         InfoRow("Private APK path", record.originalApkPath)
         InfoRow("Split APKs", record.splitApkPaths.joinToString().ifBlank { "None" })
@@ -577,17 +912,20 @@ private fun AppDetailsScreen(
 
         HorizontalDivider()
         Text("Compatibility report", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-        CompatibilityReport.capabilities.forEach { CapabilityRow(it) }
+        TextButton(onClick = { compatibilityExpanded = !compatibilityExpanded }) {
+            Text(if (compatibilityExpanded) "Hide compatibility details" else "Show compatibility details")
+        }
+        if (compatibilityExpanded) CompatibilityReport.capabilities.forEach { CapabilityRow(it) }
 
         HorizontalDivider()
-        Text("Recent diagnostics", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-        InfoRow("Crash dumps", record.crashDumpPaths.joinToString().ifBlank { "None" })
+        Text("Recent preflight findings", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+        InfoRow("Crash dumps", record.crashDumpPaths.joinToString().ifBlank { "None recorded" })
         if (record.diagnostics.isEmpty()) {
-            Text("No diagnostics recorded.")
+            Text("No preflight findings recorded. Import status still does not indicate runtime readiness.")
         } else {
-            record.diagnostics.takeLast(10).reversed().forEach { diagnostic ->
-                Text("${diagnostic.severity.uppercase()} · ${diagnostic.component}: ${diagnostic.message}")
-                diagnostic.detail?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+            record.diagnostics.takeLast(8).reversed().forEach { diagnostic ->
+                Text("${diagnostic.severity.uppercase()} · ${diagnostic.message}")
+                diagnostic.nextAction?.let { Text("Next: $it", style = MaterialTheme.typography.bodySmall) }
             }
         }
 
@@ -687,6 +1025,45 @@ private fun formatBytes(bytes: Long): String {
     return "%.1f %s".format(amount, units[unit])
 }
 
+private fun apkImportedDiagnostic(record: GuestAppRecord) = RuntimeDiagnostic(
+    timestampEpochMs = record.createdAtEpochMs,
+    severity = DiagnosticSeverity.INFO,
+    category = DiagnosticCategory.APK_IMPORT,
+    code = "APK_IMPORTED",
+    component = "APK importer",
+    operation = DiagnosticOperation.APK_IMPORT,
+    summary = "APK imported; native launchability is not verified.",
+    detail = "Detected ABI folders: ${record.guestAbis.joinToString().ifBlank { "none" }}; this is not dependency, relocation, Java/DEX, or Activity validation.",
+    guestId = record.id,
+    packageName = record.packageName,
+    nextAction = "Review preflight findings, then attempt only the bounded ARM32 native path if an ARM32 library is present.",
+)
+
+private fun storageDiagnostic(
+    record: GuestAppRecord,
+    operation: DiagnosticOperation,
+    code: String,
+    summary: String,
+    detail: String,
+) = RuntimeDiagnostic(
+    timestampEpochMs = System.currentTimeMillis(),
+    severity = DiagnosticSeverity.INFO,
+    category = DiagnosticCategory.FILESYSTEM,
+    code = code,
+    component = if (operation == DiagnosticOperation.APP_REMOVE) "Guest manager" else "Guest storage",
+    operation = operation,
+    summary = summary,
+    detail = detail,
+    guestId = record.id,
+    packageName = record.packageName,
+    nextAction = when (operation) {
+        DiagnosticOperation.DATA_EXPORT -> "Review the exported archive; its destination and contents may be visible outside RetroBridge's private storage."
+        DiagnosticOperation.DATA_CLEAR -> "The imported APK and OBB files remain available; guest data must be reattached or recreated as needed."
+        DiagnosticOperation.APP_REMOVE -> "Import the APK again to create a new isolated guest record."
+        else -> "Content is mapped only to RetroBridge's app-private guest storage; successful attachment does not prove that the game can use it."
+    },
+)
+
 private data class RuntimeSessionUi(
     val sessionId: String?,
     val state: String,
@@ -698,6 +1075,7 @@ private data class RuntimeSessionUi(
     val loadedLibraries: List<String>,
     val entrypointResults: List<String>,
     val diagnostic: String,
+    val diagnosticEvent: RuntimeDiagnostic?,
 ) {
     companion object {
         fun from(reply: GuestRuntimeSessionReply) = RuntimeSessionUi(
@@ -711,6 +1089,7 @@ private data class RuntimeSessionUi(
             loadedLibraries = reply.loadedLibraries,
             entrypointResults = reply.entrypointResults,
             diagnostic = reply.diagnostic,
+            diagnosticEvent = reply.diagnosticEvent,
         )
     }
 }

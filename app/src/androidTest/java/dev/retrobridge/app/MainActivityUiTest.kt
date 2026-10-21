@@ -6,6 +6,8 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Rule
 import org.junit.Test
@@ -25,5 +27,13 @@ class MainActivityUiTest {
         ).assertIsDisplayed()
         composeRule.onNodeWithText("Import APK").assertIsDisplayed().assertHasClickAction()
         composeRule.onAllNodesWithText("Guest APK launch is not implemented").assertCountEquals(0)
+    }
+
+    @Test
+    fun diagnosticsViewExplainsEmptyStateAndProvidesSearchAndExport() {
+        composeRule.onNodeWithText("Diagnostics (0)").performScrollTo().performClick()
+        composeRule.onNodeWithText("No diagnostics yet").assertIsDisplayed()
+        composeRule.onNodeWithText("Search diagnostics").assertIsDisplayed()
+        composeRule.onNodeWithText("Export JSON").assertHasClickAction()
     }
 }

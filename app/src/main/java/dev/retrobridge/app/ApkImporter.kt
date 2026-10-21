@@ -121,7 +121,9 @@ class ApkImporter(
                 sha256 = digest.digest().toHexString(),
                 guestAbis = nativeLibraryInspection.libraries.keys.sorted(),
                 nativeLibraries = nativeLibraryInspection.libraries,
-                diagnostics = nativeLibraryInspection.diagnostics,
+                diagnostics = nativeLibraryInspection.diagnostics.map { diagnostic ->
+                    diagnostic.copy(guestId = applicationId, packageName = packageName)
+                },
                 isolatedRoot = relativeRoot,
                 dataArchiveState = AttachmentState.NOT_PROVIDED,
                 obbState = AttachmentState.NOT_PROVIDED,
@@ -239,6 +241,10 @@ class ApkImporter(
                 component = "APK native preflight",
                 message = "ELF header checks do not establish library loadability",
                 detail = "Passing this bounded structural preflight does not validate dependencies, relocations, symbols, or guest APK launch support.",
+                code = "ELF_PREFLIGHT_NOT_LOADABILITY_TEST",
+                category = "ELF_LOADING",
+                operation = "APK_PREFLIGHT",
+                nextAction = "Attempt the selected native runtime path to inspect dependencies and relocations; that still will not verify guest Java or Activity behavior.",
             ),
         )
         var scannedEntries = 0
@@ -255,6 +261,16 @@ class ApkImporter(
                     component = "APK native preflight",
                     message = message,
                     detail = detail?.take(1024),
+                    code = when {
+                        message.contains("limit", ignoreCase = true) -> "PREFLIGHT_RESOURCE_LIMIT"
+                        message.contains("path", ignoreCase = true) -> "UNSUPPORTED_NATIVE_ARCHIVE_PATH"
+                        else -> "NATIVE_ELF_PREFLIGHT_WARNING"
+                    },
+                    category = if (detail.orEmpty().contains(".so", ignoreCase = true)) "ELF_LOADING" else "APK_IMPORT",
+                    operation = "APK_PREFLIGHT",
+                    library = detail?.substringBefore(':')?.substringAfterLast('/')
+                        ?.takeIf { it.endsWith(".so", ignoreCase = true) }?.take(255),
+                    nextAction = "Review the technical detail; APK preflight is structural only and does not prove runtime loadability.",
                 )
             } else {
                 omittedDiagnostics++
@@ -314,6 +330,10 @@ class ApkImporter(
                 component = "APK native preflight",
                 message = "Additional native preflight diagnostics were omitted",
                 detail = "$omittedDiagnostics diagnostic(s) omitted to bound registry size",
+                code = "PREFLIGHT_DIAGNOSTIC_COUNT_LIMIT",
+                category = "APK_IMPORT",
+                operation = "APK_PREFLIGHT",
+                nextAction = "Use the exported diagnostic report; only a bounded subset of native entries was inspected.",
             )
         }
         return NativeLibraryInspection(

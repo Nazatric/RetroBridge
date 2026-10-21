@@ -41,6 +41,8 @@ class GuestRuntimeDemoInstrumentedTest {
             assertEquals(GuestRuntimeProtocol.STATE_RUNNING, launched.state)
             assertTrue("Expected machine-code execution: ${launched.diagnostic}", launched.guestCodeStarted)
             assertTrue("Expected a nonzero guest instruction count", launched.guestInstructions > 0L)
+            assertEquals("RUNTIME_SESSION_RUNNING", launched.diagnosticEvent?.code)
+            assertEquals("NATIVE_EXECUTION", launched.diagnosticEvent?.operation?.name)
             assertTrue("Expected ELF relocations", launched.relocationCount > 0)
             assertEquals(0x00010006, launched.jniOnLoadVersion)
             assertTrue(launched.loadedLibraries.any { it.contains("libretrobridge_demo.so") })
@@ -58,6 +60,7 @@ class GuestRuntimeDemoInstrumentedTest {
             assertNotNull("Expected an active service-owned session", sessionId)
             val stopped = client.stopSession(requireNotNull(sessionId))
             assertEquals(GuestRuntimeProtocol.STATE_STOPPED, stopped.state)
+            assertEquals("RUNTIME_SESSION_STOPPED", stopped.diagnosticEvent?.code)
             assertTrue(stopped.guestCodeStarted)
             assertTrue(stopped.diagnostic.contains("destructors", ignoreCase = true))
 
